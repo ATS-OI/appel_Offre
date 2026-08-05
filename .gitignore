@@ -1,0 +1,10 @@
+# Secrets — ne jamais committer
+.env
+
+# Python
+__pycache__/
+*.pyc
+
+# Exports générés par les scripts de test (etape1)
+etape1_recupDataBaseOfficial/resultats_*.csv
+etape1_recupDataBaseOfficial/resultats_*.json
