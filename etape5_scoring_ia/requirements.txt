@@ -1,0 +1,7 @@
+requests>=2.31
+supabase>=2.0
+python-dotenv>=1.0
+streamlit>=1.35
+sentence-transformers>=3.0
+river>=0.21
+numpy>=1.26
