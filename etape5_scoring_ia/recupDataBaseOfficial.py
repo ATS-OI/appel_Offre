@@ -68,6 +68,8 @@ TED_FIELDS = [
     "deadline-receipt-tender-date-lot",
     "links",
     "description-lot",  # description longue de la mission (BT-24) — voir recap.md
+    "title-lot",        # titre de chaque lot (BT-21) — voir _extraire_lots_ted
+    "identifier-lot",   # identifiant de chaque lot (BT-137) — aligné par index avec title-lot/description-lot
 ]
 
 # Seuil de similarité (0-1, via difflib) au-dessus duquel deux objets d'avis
@@ -81,13 +83,19 @@ SEUIL_SIMILARITE_OBJET = 0.80
 # =====================================================================
 
 def _construire_where_boamp(
-    mots_cles: list[str],
     departements: list[str],
     seulement_ouverts: bool,
-    acheteurs: list[str] | None = None,
 ) -> str:
-    """Construit la clause ODSQL `where=` :
-    ((motclés objet OR) OR (acheteurs suivis OR)) AND (départements OR) AND (date limite).
+    """Construit la clause ODSQL `where=` : (départements OR) AND (date limite).
+
+    Ne filtre plus par mots-clés/acheteurs côté serveur (voir
+    `recuperer_appels_offres`/`_est_pertinent`) : le filtre BOAMP `objet
+    like` ne porte que sur le titre de haut niveau de l'avis, qui ne contient
+    PAS le détail des lots (`donnees`/eForms) sur les marchés multi-lots —
+    vérifié en direct (ex. avis BOAMP 24-24231, objet générique mais 10 lots
+    aux titres très différents). Filtrer mots-clés/lots/acheteurs après coup,
+    côté client, sur les données déjà récupérées, évite de rater un avis
+    dont seul un lot correspond — voir recap.md "Filtrage côté client".
 
     NOTE : le champ `code_departement_prestation` (lieu d'exécution) existe dans le
     schéma BOAMP mais n'est en pratique quasiment jamais renseigné sur les avis
@@ -96,16 +104,8 @@ def _construire_where_boamp(
     un champ liste qui contient le(s) département(s) concerné(s) par l'avis —
     voir recap.md pour le détail.
     """
-    clause_motcles = " or ".join(f'objet like "%{mot}%"' for mot in mots_cles)
-    clause_recherche = f"({clause_motcles})"
-
-    if acheteurs:
-        clause_acheteurs = " or ".join(f'nomacheteur like "%{a}%"' for a in acheteurs)
-        clause_recherche = f"(({clause_motcles}) or ({clause_acheteurs}))"
-
     clause_departements = " or ".join(f'code_departement="{dep}"' for dep in departements)
-
-    clauses = [clause_recherche, f"({clause_departements})"]
+    clauses = [f"({clause_departements})"]
 
     if seulement_ouverts:
         aujourdhui = date.today().isoformat()
@@ -115,15 +115,17 @@ def _construire_where_boamp(
 
 
 def interroger_boamp(
-    mots_cles: list[str],
     departements: list[str],
     seulement_ouverts: bool,
     limit: int,
     verbeux: bool = True,
-    acheteurs: list[str] | None = None,
 ) -> list[dict]:
-    """Interroge l'API BOAMP (GET, pagination par offset) et retourne les enregistrements bruts."""
-    where = _construire_where_boamp(mots_cles, departements, seulement_ouverts, acheteurs)
+    """Interroge l'API BOAMP (GET, pagination par offset) et retourne les enregistrements bruts.
+
+    Pas de filtre mots-clés/acheteurs ici (voir `_construire_where_boamp`) —
+    uniquement département + date limite.
+    """
+    where = _construire_where_boamp(departements, seulement_ouverts)
     if verbeux:
         print(f"[BOAMP] where = {where}")
 
@@ -170,31 +172,22 @@ def interroger_boamp(
 # =====================================================================
 
 def _construire_requete_ted(
-    mots_cles: list[str],
     departements: list[str],
     seulement_ouverts: bool,
-    acheteurs: list[str] | None = None,
 ) -> str:
-    """Construit la requête "expert query" TED :
-    ((motclés OR) OR (acheteurs suivis OR)) AND (NUTS OR) AND (deadline).
+    """Construit la requête "expert query" TED : (NUTS OR) AND (deadline).
 
-    TED n'a pas de champ dédié filtrable pour le nom de l'acheteur en dehors
-    du texte intégral (voir recap.md) : `FT~` couvre déjà tout le texte de la
-    notice, y compris le nom de l'acheteur — vérifié en pratique.
+    Ne filtre plus par mots-clés/acheteurs côté serveur (voir
+    `recuperer_appels_offres`/`_est_pertinent`, même raison que côté BOAMP :
+    on veut pouvoir matcher sur le texte des lots après coup, pas seulement
+    sur le texte intégral de la notice au moment de la requête).
     """
-    clause_motcles = " OR ".join(f'FT~"{mot}"' for mot in mots_cles)
-    clause_recherche = f"({clause_motcles})"
-
-    if acheteurs:
-        clause_acheteurs = " OR ".join(f'FT~"{a}"' for a in acheteurs)
-        clause_recherche = f"(({clause_motcles}) OR ({clause_acheteurs}))"
-
     codes_nuts = [NUTS_MAP[dep] for dep in departements if dep in NUTS_MAP]
     if not codes_nuts:
         raise ValueError("Aucun code NUTS connu pour les départements demandés — complétez NUTS_MAP.")
     clause_nuts = " OR ".join(f"place-of-performance={code}" for code in codes_nuts)
 
-    clauses = [clause_recherche, f"({clause_nuts})"]
+    clauses = [f"({clause_nuts})"]
 
     if seulement_ouverts:
         clauses.append("deadline-receipt-tender-date-lot>=today()")
@@ -203,15 +196,17 @@ def _construire_requete_ted(
 
 
 def interroger_ted(
-    mots_cles: list[str],
     departements: list[str],
     seulement_ouverts: bool,
     limit: int,
     verbeux: bool = True,
-    acheteurs: list[str] | None = None,
 ) -> list[dict]:
-    """Interroge l'API TED Search v3 (POST JSON) et retourne les notices brutes."""
-    query = _construire_requete_ted(mots_cles, departements, seulement_ouverts, acheteurs)
+    """Interroge l'API TED Search v3 (POST JSON) et retourne les notices brutes.
+
+    Pas de filtre mots-clés/acheteurs ici (voir `_construire_requete_ted`) —
+    uniquement NUTS + date limite.
+    """
+    query = _construire_requete_ted(departements, seulement_ouverts)
     if verbeux:
         print(f"[TED] query = {query}")
 
@@ -278,6 +273,22 @@ def _texte_multilingue_complet(champ_multilingue: dict | None, langues_preferees
     if isinstance(valeur, list):
         return " | ".join(str(v) for v in valeur if v)
     return str(valeur)
+
+
+def _liste_multilingue(champ_multilingue: dict | None, langues_preferees: tuple[str, ...] = ("fra", "eng")) -> list[str]:
+    """Comme `_texte_multilingue_complet`, mais renvoie la LISTE de valeurs
+    (une par lot, ex. `title-lot`) au lieu de les joindre en un seul texte —
+    utilisé pour aligner par index avec `identifier-lot`/`description-lot`
+    dans `_extraire_lots_ted`.
+    """
+    if not champ_multilingue:
+        return []
+    for langue in langues_preferees:
+        if langue in champ_multilingue:
+            valeur = champ_multilingue[langue]
+            return valeur if isinstance(valeur, list) else [str(valeur)]
+    valeur = next(iter(champ_multilingue.values()), [])
+    return valeur if isinstance(valeur, list) else [str(valeur)]
 
 
 def _normaliser_date(valeur: str) -> str:
@@ -354,6 +365,80 @@ def _extraire_description_boamp(donnees_json: str | None) -> str:
     return chercher(donnees)
 
 
+def _extraire_lots_boamp(donnees_json: str | None) -> list[dict]:
+    """Best-effort : extrait le détail des lots depuis le blob JSON brut du
+    champ `donnees` (structure eForms — `cac:ProcurementProjectLot`, un dict
+    si le marché n'a qu'un seul lot, une liste sinon — les deux formes sont
+    apparues en pratique sur des avis réels). Pour chaque lot, renvoie son
+    identifiant (`cbc:ID`), son titre (`cac:ProcurementProject.cbc:Name`) et
+    sa description (`cbc:Description`) — c'est ce texte, souvent absent du
+    champ `objet` de haut niveau sur les marchés multi-lots, qui alimente le
+    filtre `mots_cles_lots` et le scoring (voir recap.md).
+    """
+    if not donnees_json:
+        return []
+    try:
+        donnees = json.loads(donnees_json)
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+    def chercher(obj: object) -> object | None:
+        if isinstance(obj, dict):
+            if "cac:ProcurementProjectLot" in obj:
+                return obj["cac:ProcurementProjectLot"]
+            for valeur in obj.values():
+                trouve = chercher(valeur)
+                if trouve is not None:
+                    return trouve
+        elif isinstance(obj, list):
+            for item in obj:
+                trouve = chercher(item)
+                if trouve is not None:
+                    return trouve
+        return None
+
+    brut = chercher(donnees)
+    if brut is None:
+        return []
+    lots_bruts = brut if isinstance(brut, list) else [brut]
+
+    lots = []
+    for lot in lots_bruts:
+        if not isinstance(lot, dict):
+            continue
+        identifiant = lot.get("cbc:ID")
+        identifiant = identifiant.get("#text", "") if isinstance(identifiant, dict) else (identifiant or "")
+        projet = lot.get("cac:ProcurementProject") or {}
+        titre = projet.get("cbc:Name")
+        titre = titre.get("#text", "") if isinstance(titre, dict) else (titre or "")
+        description = projet.get("cbc:Description")
+        description = description.get("#text", "") if isinstance(description, dict) else (description or "")
+        if identifiant or titre or description:
+            lots.append({"identifiant": str(identifiant), "titre": str(titre), "description": str(description)})
+    return lots
+
+
+def _extraire_lots_ted(notice: dict) -> list[dict]:
+    """Reconstruit la liste des lots d'une notice TED à partir des 3 champs
+    parallèles `identifier-lot` (liste plate), `title-lot`/`description-lot`
+    (multilingues) — alignés par index (vérifié en direct : les 3 listes ont
+    toujours la même longueur sur les notices testées).
+    """
+    identifiants = notice.get("identifier-lot") or []
+    titres = _liste_multilingue(notice.get("title-lot"))
+    descriptions = _liste_multilingue(notice.get("description-lot"))
+
+    nb_lots = max(len(identifiants), len(titres), len(descriptions))
+    lots = []
+    for i in range(nb_lots):
+        identifiant = identifiants[i] if i < len(identifiants) else ""
+        titre = titres[i] if i < len(titres) else ""
+        description = descriptions[i] if i < len(descriptions) else ""
+        if identifiant or titre or description:
+            lots.append({"identifiant": str(identifiant), "titre": str(titre), "description": str(description)})
+    return lots
+
+
 def normaliser_boamp(records: list[dict]) -> list[dict]:
     resultats = []
     for f in records:
@@ -362,6 +447,7 @@ def normaliser_boamp(records: list[dict]) -> list[dict]:
             "identifiant": f.get("idweb") or "",
             "objet": f.get("objet") or "",
             "description": _extraire_description_boamp(f.get("donnees")),
+            "lots": _extraire_lots_boamp(f.get("donnees")),
             "acheteur": f.get("nomacheteur") or "",
             "departement": _normaliser_departement_boamp(f.get("code_departement")),
             "date_parution": _normaliser_date(f.get("dateparution") or ""),
@@ -401,6 +487,7 @@ def normaliser_ted(notices: list[dict]) -> list[dict]:
             "identifiant": n.get("publication-number") or "",
             "objet": _premiere_valeur(n.get("notice-title")),
             "description": _texte_multilingue_complet(n.get("description-lot")),
+            "lots": _extraire_lots_ted(n),
             "acheteur": _premiere_valeur(n.get("buyer-name")),
             "departement": _normaliser_departement_ted(n.get("place-of-performance") or []),
             "date_parution": _normaliser_date(date_parution),
@@ -538,6 +625,13 @@ def fusionner_doublons(resultats: list[dict]) -> list[dict]:
             "description": representant.get("description") or next(
                 (m.get("description") for m in membres_tries if m.get("description")), ""
             ),
+            # même compromis que `description` : lots du représentant du
+            # groupe (version la plus à jour), sinon le premier membre qui
+            # en a (une version antérieure a pu porter le détail des lots
+            # que le rectificatif le plus récent n'a pas repris).
+            "lots": representant.get("lots") or next(
+                (m.get("lots") for m in membres_tries if m.get("lots")), []
+            ),
             "acheteur": representant["acheteur"],
             "departement": ", ".join(departements),
             "date_parution": representant["date_parution"],
@@ -566,6 +660,7 @@ def _sans_fusion(resultats: list[dict]) -> list[dict]:
             "identifiants": [r["identifiant"]] if r["identifiant"] else [],
             "objet": r["objet"],
             "description": r.get("description") or "",
+            "lots": r.get("lots") or [],
             "acheteur": r["acheteur"],
             "departement": r["departement"],
             "date_parution": r["date_parution"],
@@ -581,6 +676,63 @@ def _sans_fusion(resultats: list[dict]) -> list[dict]:
 
 
 # =====================================================================
+# Filtrage côté client (mots-clés / lots / acheteurs)
+# =====================================================================
+
+def _texte_lots(lots: list[dict]) -> str:
+    """Concatène titres + descriptions de tous les lots d'un avis en un seul
+    texte, pour la recherche de mots-clés (`_est_pertinent`) et le scoring.
+    """
+    morceaux = []
+    for lot in lots or []:
+        if lot.get("titre"):
+            morceaux.append(lot["titre"])
+        if lot.get("description"):
+            morceaux.append(lot["description"])
+    return " ".join(morceaux)
+
+
+def _est_pertinent(
+    groupe: dict,
+    mots_cles: list[str],
+    mots_cles_lots: list[str],
+    acheteurs: list[str],
+) -> bool:
+    """Un avis (déjà normalisé/fusionné) est pertinent si son objet matche un
+    mot-clé, OU si un de ses lots matche un mot-clé "lots", OU si son
+    acheteur figure dans la liste suivie — comparaison accent/casse-
+    insensible (`_normaliser_texte`, déjà utilisé pour le dédoublonnage).
+
+    Remplace l'ancien filtrage côté serveur (BOAMP `objet like`, TED `FT~`) :
+    ceux-ci ne portaient que sur le titre/texte intégral de l'avis, jamais
+    spécifiquement sur le détail des lots (voir `_construire_where_boamp`,
+    recap.md "Filtrage côté client") — un mot-clé présent uniquement dans un
+    lot ne matchait donc jamais, et l'avis était raté silencieusement.
+
+    Si les 3 listes sont vides (aucun filtre configuré), tout est gardé
+    (même comportement que `aws.py`, étape 6).
+    """
+    if not mots_cles and not mots_cles_lots and not acheteurs:
+        return True
+
+    objet_normalise = _normaliser_texte(groupe.get("objet") or "")
+    if any(_normaliser_texte(mot) in objet_normalise for mot in mots_cles):
+        return True
+
+    if acheteurs:
+        acheteur_normalise = _normaliser_texte(groupe.get("acheteur") or "")
+        if any(_normaliser_texte(a) in acheteur_normalise for a in acheteurs):
+            return True
+
+    if mots_cles_lots:
+        texte_lots_normalise = _normaliser_texte(_texte_lots(groupe.get("lots") or []))
+        if any(_normaliser_texte(mot) in texte_lots_normalise for mot in mots_cles_lots):
+            return True
+
+    return False
+
+
+# =====================================================================
 # Fonction d'entrée "boîte noire"
 # =====================================================================
 
@@ -589,14 +741,25 @@ def recuperer_appels_offres(
     departements: list[str],
     seulement_ouverts: bool = True,
     sources: dict[str, bool] | None = None,
-    limit_par_source: int = 100,
+    limit_par_source: int = 250,
     dedupliquer: bool = True,
     verbeux: bool = True,
     acheteurs: list[str] | None = None,
+    mots_cles_lots: list[str] | None = None,
 ) -> list[dict]:
     """Point d'entrée unique de la bibliothèque : interroge BOAMP et/ou TED et
     renvoie une liste de dicts JSON-sérialisable, prête à être réutilisée par
     n'importe quel autre script du projet.
+
+    BOAMP/TED ne sont interrogés que par département/date (voir
+    `_construire_where_boamp`/`_construire_requete_ted`) — le filtrage par
+    mots-clés/lots/acheteurs est fait ENSUITE, côté client, sur les
+    résultats déjà récupérés et fusionnés (voir `_est_pertinent`). Ce choix
+    est nécessaire pour pouvoir matcher sur le texte des LOTS (voir
+    `mots_cles_lots` ci-dessous), invisible pour un filtre serveur portant
+    seulement sur l'objet/le texte intégral de l'avis. Volumes vérifiés en
+    direct sans aucune restriction mot-clé (974+976, avis ouverts) : ~180
+    BOAMP + ~125 TED — largement gérable en un seul aller-retour paginé.
 
     Paramètres
     ----------
@@ -606,14 +769,20 @@ def recuperer_appels_offres(
         réponse n'est pas encore passée.
     sources : quelles bases interroger, ex. {"boamp": True, "ted": True}.
         Par défaut, les deux sont actives.
-    limit_par_source : nombre max de résultats bruts récupérés par source.
+    limit_par_source : nombre max de résultats bruts récupérés par source
+        (avant filtrage — voir remarque ci-dessus sur les volumes réels).
     dedupliquer : si True (par défaut), fusionne en une seule ligne tous les
         avis d'un même dossier (rectificatifs BOAMP, republications TED,
         correspondances BOAMP<->TED) — voir `fusionner_doublons`.
     verbeux : si True, affiche la progression sur la sortie standard.
     acheteurs : liste optionnelle d'acheteurs suivis, combinés en OU avec
-        `mots_cles` (un avis matche si son objet contient un mot-clé, OU si
-        son acheteur contient l'un de ces noms) — voir recap.md.
+        `mots_cles`/`mots_cles_lots` (un avis matche si son objet contient un
+        mot-clé, OU si un de ses lots contient un mot-clé "lots", OU si son
+        acheteur contient l'un de ces noms) — voir recap.md.
+    mots_cles_lots : liste optionnelle de mots-clés recherchés spécifiquement
+        dans le titre/la description de chaque LOT de l'avis (pas seulement
+        son objet global) — voir `_est_pertinent`, recap.md "Filtrage côté
+        client".
 
     Retour
     ------
@@ -625,23 +794,30 @@ def recuperer_appels_offres(
         departement (codes normalisés, ex. "974, 976"),
         date_parution, date_limite_reponse (format uniforme AAAA-MM-JJ),
         urls (liste de tous les liens du groupe),
-        nb_versions (nombre d'avis fusionnés dans cette ligne).
+        nb_versions (nombre d'avis fusionnés dans cette ligne),
+        lots (liste de {"identifiant", "titre", "description"}, éventuellement vide).
     """
     sources = sources if sources is not None else {"boamp": True, "ted": True}
+    mots_cles_lots = mots_cles_lots or []
+    acheteurs = acheteurs or []
 
     tous_resultats: list[dict] = []
 
     if sources.get("boamp"):
-        records_boamp = interroger_boamp(mots_cles, departements, seulement_ouverts, limit_par_source, verbeux, acheteurs)
+        records_boamp = interroger_boamp(departements, seulement_ouverts, limit_par_source, verbeux)
         tous_resultats.extend(normaliser_boamp(records_boamp))
 
     if sources.get("ted"):
-        notices_ted = interroger_ted(mots_cles, departements, seulement_ouverts, limit_par_source, verbeux, acheteurs)
+        notices_ted = interroger_ted(departements, seulement_ouverts, limit_par_source, verbeux)
         tous_resultats.extend(normaliser_ted(notices_ted))
 
-    if dedupliquer:
-        return fusionner_doublons(tous_resultats)
-    return _sans_fusion(tous_resultats)
+    fusionnes = fusionner_doublons(tous_resultats) if dedupliquer else _sans_fusion(tous_resultats)
+
+    pertinents = [g for g in fusionnes if _est_pertinent(g, mots_cles, mots_cles_lots, acheteurs)]
+    if verbeux:
+        print(f"[Filtrage] {len(pertinents)}/{len(fusionnes)} avis pertinent(s) "
+              f"(mots-clés objet/lots/acheteurs suivis).")
+    return pertinents
 
 
 if __name__ == "__main__":

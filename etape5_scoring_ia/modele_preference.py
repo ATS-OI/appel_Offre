@@ -43,14 +43,16 @@ NB_DIMENSIONS_EMBEDDING = 1024
 
 # --- Modèle A : embedding brut + structurées + similarité profil ---------
 CATEGORIELLES_A = ["source", "departement"]
-NUMERIQUES_A = ["jours_urgence", "jours_fraicheur", "score_mots_cles", "longueur_objet", "similarite_profil"] + [
-    f"emb_{i}" for i in range(NB_DIMENSIONS_EMBEDDING)
-]
+NUMERIQUES_A = [
+    "jours_urgence", "jours_fraicheur", "score_mots_cles", "score_mots_cles_lots",
+    "nb_lots", "longueur_objet", "similarite_profil",
+] + [f"emb_{i}" for i in range(NB_DIMENSIONS_EMBEDDING)]
 
 # --- Modèle B : sans embedding brut, features enrichies -------------------
 CATEGORIELLES_B = ["source", "departement", "type_procedure", "nature_libelle", "descripteur_libelle"]
 NUMERIQUES_B = [
-    "jours_urgence", "jours_fraicheur", "score_mots_cles", "longueur_objet",
+    "jours_urgence", "jours_fraicheur", "score_mots_cles", "score_mots_cles_lots",
+    "nb_lots", "longueur_objet",
     "sim_centroide_like", "sim_centroide_dislike", "knn_like_ratio",
 ]
 
@@ -87,6 +89,8 @@ def vectoriser_a(features: dict, profil_embedding: list[float]) -> dict:
         "jours_urgence": features.get("jours_urgence") or 0,
         "jours_fraicheur": features.get("jours_fraicheur") or 0,
         "score_mots_cles": features.get("score_mots_cles") or 0.0,
+        "score_mots_cles_lots": features.get("score_mots_cles_lots") or 0.0,
+        "nb_lots": features.get("nb_lots") or 0,
         "longueur_objet": features.get("longueur_objet") or 0,
         "source": features.get("source") or "inconnue",
         "departement": _categorie(features.get("departement")),
@@ -101,6 +105,8 @@ def vectoriser_b(features_b: dict) -> dict:
         "jours_urgence": features_b.get("jours_urgence") or 0,
         "jours_fraicheur": features_b.get("jours_fraicheur") or 0,
         "score_mots_cles": features_b.get("score_mots_cles") or 0.0,
+        "score_mots_cles_lots": features_b.get("score_mots_cles_lots") or 0.0,
+        "nb_lots": features_b.get("nb_lots") or 0,
         "longueur_objet": features_b.get("longueur_objet") or 0,
         "source": features_b.get("source") or "inconnue",
         "departement": _categorie(features_b.get("departement")),

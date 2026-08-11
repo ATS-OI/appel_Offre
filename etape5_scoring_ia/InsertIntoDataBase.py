@@ -24,7 +24,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from supabase import Client, create_client
 
-from listes_partagees import charger_acheteurs_suivis, charger_mots_cles
+from listes_partagees import charger_acheteurs_suivis, charger_mots_cles, charger_mots_cles_lots
 from modele_preference import charger_modele
 from pipeline_scoring import predict_score
 from profil_cible import charger_ou_calculer_profil
@@ -38,7 +38,12 @@ DEPARTEMENTS: list[str] = ["974", "976"]
 SOURCES_ACTIVES: dict[str, bool] = {"boamp": True, "ted": True}
 SEULEMENT_OUVERTS: bool = True
 DEDUPLIQUER: bool = True
-LIMIT_PAR_SOURCE: int = 100
+# Filtrage mots-clés/lots/acheteurs désormais fait côté client, APRÈS
+# récupération (voir recupDataBaseOfficial.py, recap.md "Filtrage côté
+# client") — donc ce n'est plus un plafond "final" mais le nombre de
+# résultats BRUTS récupérés par source avant filtrage. Volumes réels vérifiés
+# en direct sans filtre (974+976, avis ouverts) : ~180 BOAMP + ~125 TED.
+LIMIT_PAR_SOURCE: int = 250
 
 NOM_TABLE = "appels_offres"
 
@@ -74,6 +79,7 @@ def formater_pour_supabase(resultat: dict) -> dict:
         "identifiants": "; ".join(resultat["identifiants"]),
         "objet": resultat["objet"],
         "description": resultat.get("description") or None,
+        "lots": resultat.get("lots") or [],
         "source": "+".join(resultat["source"]),
         "acheteur": resultat["acheteur"],
         "departement": departement,
@@ -87,7 +93,7 @@ def formater_pour_supabase(resultat: dict) -> dict:
     }
 
 
-def inserer_resultats(client: Client, resultats: list[dict], mots_cles: list[str]) -> None:
+def inserer_resultats(client: Client, resultats: list[dict], mots_cles: list[str], mots_cles_lots: list[str]) -> None:
     if not resultats:
         print("Aucun résultat à insérer.")
         return
@@ -124,7 +130,10 @@ def inserer_resultats(client: Client, resultats: list[dict], mots_cles: list[str
             "nature_libelle": source_boamp.get("nature_libelle") or "",
             "descripteur_libelle": source_boamp.get("descripteur_libelle") or [],
         }
-        predict_score(client, ligne_enrichie, mots_cles, etat_a=etat_a, etat_b=etat_b, profil_embedding=profil_embedding)
+        predict_score(
+            client, ligne_enrichie, mots_cles, mots_cles_lots,
+            etat_a=etat_a, etat_b=etat_b, profil_embedding=profil_embedding,
+        )
 
     print(f"[Scoring IA] scores A/B calculés pour {len(lignes_upsertees)} avis.")
 
@@ -141,11 +150,14 @@ def lancer_recherche_et_insertion(client: Client | None = None) -> list[dict]:
     client = client or charger_client_supabase()
 
     mots_cles = charger_mots_cles(client)
+    mots_cles_lots = charger_mots_cles_lots(client)
     acheteurs = charger_acheteurs_suivis(client)
-    print(f"[Config] {len(mots_cles)} mot(s)-clé(s), {len(acheteurs)} acheteur(s) suivi(s) chargés depuis Supabase.")
+    print(f"[Config] {len(mots_cles)} mot(s)-clé(s), {len(mots_cles_lots)} mot(s)-clé(s) lots, "
+          f"{len(acheteurs)} acheteur(s) suivi(s) chargés depuis Supabase.")
 
     resultats = recuperer_appels_offres(
         mots_cles=mots_cles,
+        mots_cles_lots=mots_cles_lots,
         departements=DEPARTEMENTS,
         seulement_ouverts=SEULEMENT_OUVERTS,
         sources=SOURCES_ACTIVES,
@@ -156,7 +168,7 @@ def lancer_recherche_et_insertion(client: Client | None = None) -> list[dict]:
     )
     print(f"[Récupération] {len(resultats)} appel(s) d'offre(s) récupéré(s) et fusionné(s).")
 
-    inserer_resultats(client, resultats, mots_cles)
+    inserer_resultats(client, resultats, mots_cles, mots_cles_lots)
     return resultats
 
 

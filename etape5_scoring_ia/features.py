@@ -55,6 +55,13 @@ DIMENSIONS_EMBEDDING = 1024
 # tokens du modèle, qui compte aussi le préfixe "query: " ajouté ci-dessous).
 MOTS_MAX_TEXTE = 350
 
+# Seuil de similarité cosinus au-delà duquel deux avis sont considérés comme
+# des quasi-doublons pour l'entraînement (voir `existe_apprentissage_proche`,
+# schema_v5_antidoublons.sql, recap.md "Anti-doublons / anti-fuite").
+# Volontairement conservateur : mieux vaut laisser passer un doublon limite
+# que sauter à tort l'apprentissage d'un avis réellement différent.
+SEUIL_DOUBLON_EMBEDDING = 0.97
+
 
 @lru_cache(maxsize=1)
 def charger_modele_embedding():
@@ -69,25 +76,45 @@ def charger_modele_embedding():
     return SentenceTransformer(NOM_MODELE_EMBEDDING, device="cpu")
 
 
+def _texte_lots(lots: list[dict] | None) -> str:
+    """Concatène titres + descriptions des lots d'un avis en un seul texte —
+    voir aussi `recupDataBaseOfficial._texte_lots` (même logique, dupliquée
+    volontairement pour ne pas faire dépendre `features.py` du scraper).
+    """
+    morceaux = []
+    for lot in lots or []:
+        if lot.get("titre"):
+            morceaux.append(lot["titre"])
+        if lot.get("description"):
+            morceaux.append(lot["description"])
+    return " ".join(morceaux)
+
+
 def construire_texte(offre: dict) -> str:
     """Concatène les champs textuels pertinents d'un avis (objet + acheteur +
-    description longue si disponible), tronqués proprement.
+    description longue + lots si disponibles), tronqués proprement.
 
     `offre` est un dict avec au moins `objet` et `acheteur` (schéma de la
     table `appels_offres` — voir etape2/recap.md). `description` (BOAMP
     best-effort / TED `description-lot`) est ajoutée quand disponible —
     c'est elle qui apporte le plus de substance à l'embedding, l'objet seul
-    étant souvent court.
+    étant souvent court. `lots` (titre + description de chaque lot) est
+    ajouté en dernier : sur un marché multi-lots, l'objet de haut niveau est
+    souvent générique, le détail pertinent (ex. "menuiserie", "plâtre") est
+    dans les lots — voir recap.md "Lots dans le scoring".
     """
     objet = (offre.get("objet") or "").strip()
     acheteur = (offre.get("acheteur") or "").strip()
     description = (offre.get("description") or "").strip()
+    texte_lots = _texte_lots(offre.get("lots")).strip()
 
     texte = objet
     if acheteur:
         texte += f". Acheteur : {acheteur}."
     if description:
         texte += f" {description}"
+    if texte_lots:
+        texte += f" Lots : {texte_lots}"
 
     mots = texte.split()
     if len(mots) > MOTS_MAX_TEXTE:
@@ -119,21 +146,30 @@ def _jours_entre(date_str: str | None, depuis_aujourdhui: bool) -> int | None:
     return (d - aujourdhui).days if depuis_aujourdhui else (aujourdhui - d).days
 
 
-def calculer_features_structurees(offre: dict, mots_cles: list[str]) -> dict:
+def calculer_features_structurees(offre: dict, mots_cles: list[str], mots_cles_lots: list[str] | None = None) -> dict:
     """Calcule les features structurées (hors embedding) d'un avis.
 
     `offre` : dict issu de la table `appels_offres` (objet, acheteur,
-    departement [ARRAY], source, date_parution, date_limite_reponse).
+    departement [ARRAY], source, date_parution, date_limite_reponse, lots).
     """
     departement = offre.get("departement") or []
     if not isinstance(departement, list):
         departement = [departement]
     departement = [str(d) for d in departement]
 
+    lots = offre.get("lots") or []
+    mots_cles_lots = mots_cles_lots or []
+
     return {
         "jours_urgence": _jours_entre(offre.get("date_limite_reponse"), depuis_aujourdhui=True),
         "jours_fraicheur": _jours_entre(offre.get("date_parution"), depuis_aujourdhui=False),
         "score_mots_cles": float(compter_mots_cles(offre.get("objet") or "", mots_cles)),
+        # Correspondance mots-clés "lots" (table mots_cles_lots) sur le texte
+        # des lots — complète score_mots_cles (objet seul) : un marché
+        # multi-lots à objet générique peut avoir un lot très pertinent (voir
+        # recap.md "Lots dans le scoring").
+        "score_mots_cles_lots": float(compter_mots_cles(_texte_lots(lots), mots_cles_lots)),
+        "nb_lots": len(lots),
         "departement": departement,
         "source": offre.get("source") or "",
         "longueur_objet": len(offre.get("objet") or ""),
@@ -156,18 +192,51 @@ def similarite_cosinus(a: list[float] | None, b: list[float] | None) -> float:
     return float(sum(x * y for x, y in zip(a, b)))
 
 
-def knn_like_ratio(client: Client, embedding: list[float], k: int = 10) -> float:
+def knn_like_ratio(client: Client, embedding: list[float], appel_offre_id: str | None = None, k: int = 10) -> float:
     """Proportion de "like" parmi les k avis déjà swipés les plus proches de
     `embedding` (similarité cosinus via pgvector, fonction RPC
-    `match_swipes_proches` — voir schema_v2_ab_test.sql). Renvoie 0.5
-    (neutre) si aucun swipe n'existe encore.
+    `match_swipes_proches` — voir schema_v2_ab_test.sql/schema_v5_antidoublons.sql).
+    Renvoie 0.5 (neutre) si aucun swipe n'existe encore.
+
+    `appel_offre_id`, quand fourni, est exclu des voisins retournés : sans
+    ça, un avis déjà swipé par un AUTRE utilisateur (file de tri indépendante
+    par utilisateur) peut se retrouver son propre voisin à similarité 1.0,
+    ce qui fuit directement l'étiquette dans sa propre feature — voir
+    recap.md "Anti-doublons / anti-fuite".
     """
-    reponse = client.rpc("match_swipes_proches", {"vecteur": embedding, "k": k}).execute()
+    reponse = client.rpc(
+        "match_swipes_proches",
+        {"vecteur": embedding, "k": k, "exclu": appel_offre_id},
+    ).execute()
     voisins = reponse.data or []
     if not voisins:
         return 0.5
     nb_like = sum(1 for v in voisins if v.get("decision") == "like")
     return nb_like / len(voisins)
+
+
+def existe_apprentissage_proche(client: Client, embedding: list[float], seuil: float = SEUIL_DOUBLON_EMBEDDING) -> bool:
+    """True si un avis déjà appris par les modèles (`deja_appris = true`,
+    voir `marquer_appris`) a un embedding très proche de `embedding`
+    (similarité cosinus > `seuil`) — que ce soit littéralement le même avis
+    (swipé une 2e fois par un autre utilisateur) ou un quasi-doublon de
+    contenu (rectificatif mal chaîné, republication BOAMP+TED). Dans ce cas,
+    l'entraînement sur ce nouveau swipe doit être sauté (voir
+    `pipeline_scoring.update_model` et recap.md "Anti-doublons / anti-fuite").
+    """
+    reponse = client.rpc(
+        "existe_apprentissage_proche",
+        {"vecteur": embedding, "seuil": seuil},
+    ).execute()
+    return bool(reponse.data)
+
+
+def marquer_appris(client: Client, appel_offre_id: str) -> None:
+    """Marque cet avis comme déjà utilisé pour l'entraînement des modèles
+    (`deja_appris = true`), à appeler juste après un `apprendre_a`/`apprendre_b`
+    réussi — voir `existe_apprentissage_proche`.
+    """
+    client.table(TABLE_FEATURES).update({"deja_appris": True}).eq("appel_offre_id", appel_offre_id).execute()
 
 
 def _charger_features_en_cache(client: Client, appel_offre_id: str) -> dict | None:
@@ -185,7 +254,12 @@ def _charger_features_en_cache(client: Client, appel_offre_id: str) -> dict | No
     return ligne
 
 
-def extraire_et_stocker_features(client: Client, offre: dict, mots_cles: list[str]) -> dict:
+def extraire_et_stocker_features(
+    client: Client,
+    offre: dict,
+    mots_cles: list[str],
+    mots_cles_lots: list[str] | None = None,
+) -> dict:
     """Renvoie les features (embedding + structurées) d'un avis, en réutilisant
     le cache `appels_offres_features` si déjà calculé, sinon en les calculant
     et en les stockant.
@@ -196,7 +270,7 @@ def extraire_et_stocker_features(client: Client, offre: dict, mots_cles: list[st
     if en_cache is not None:
         return en_cache
 
-    structurees = calculer_features_structurees(offre, mots_cles)
+    structurees = calculer_features_structurees(offre, mots_cles, mots_cles_lots)
     texte = construire_texte(offre)
     embedding = calculer_embedding(texte)
 

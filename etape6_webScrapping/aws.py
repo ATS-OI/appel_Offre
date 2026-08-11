@@ -11,17 +11,41 @@ EMAIL_AWS = os.getenv("EMAIL_AWS")
 MOT_DE_PASSE_AWS = os.getenv("MOT_DE_PASSE_AWS")
 
 # =====================================================================
-# 🛠️ TABLEAU DE BORD
+# 🛠️ TABLEAU DE BORD D'EXPÉRIMENTATION
 # =====================================================================
 CONFIG = {
     "departements": ["974", "976"],
-    # Logique "OU" : Si n'importe quel de ces mots est dans l'objet ou les lots
-    "mots_cles": [
-        "rénovation", "construction", "école", "collège", "lycée", 
-        "université", "laboratoire", "paillasse", "cuisine", 
-        "placard", "agencement", "mobilier", "médical", "air"
-    ],
-    "uniquement_en_cours": True
+    "uniquement_en_cours": True,
+
+    # 1. GESTION DU FILTRE ACHETEUR
+    "filtre_acheteur": {
+        "actif": False, # 🔴 Mettre à True pour activer le filtrage des acheteurs
+        # Le script acceptera si l'un de ces mots est inclus dans le nom de l'acheteur
+        "liste_cibles": ["sidr", "cbo", "shlmr", "sedre", "spag", "icade", "opale", "jwh", "cirad"]
+    },
+
+    # 2. GESTION DE LA RECHERCHE PAR MOTS-CLÉS
+    "filtre_mots_cles": {
+        
+        # --- RECHERCHE DANS LE TITRE DU MARCHÉ ---
+        "recherche_dans_titre": True, 
+        "mots_cles_titre": [
+            "rénovation", "construction", "école", "collège", "lycée", 
+            "université", "laboratoire", "logement", "paillasse", "cuisine", 
+            "placard", "agencement", "mobilier", "infrastructure", "réhabilitation", 
+            "salle de classe", "salle de bain", "meuble", "cloison sanitaire", 
+            "saniclip", "équipement spécialisé", "materiel de laboratoire", 
+            "plan vasque", "aménagement", "menuiserie", "plan de travail", "restructuration"
+        ],
+
+        # --- RECHERCHE SPÉCIFIQUE DANS LES LOTS ---
+        "recherche_dans_lots": True,  
+        "mots_cles_lots": [
+            "menuiserie", "meuble", "cuisine", "sdb", "salle de bain", 
+            "placard", "aménagement", "mobilier", "agencement", 
+            "salle spécialisée", "cloison", "paillasse", "sur mesure"
+        ]
+    }
 }
 # =====================================================================
 
@@ -54,7 +78,7 @@ def recuperer_token_frais():
     return token_jwt
 
 def fetch_and_filter_aws(token):
-    """Télécharge et filtre les données JSON."""
+    """Télécharge et filtre les données selon le Tableau de Bord."""
     url_api = "https://awsolutions.fr/apiSelenee/apiSearch/searchConsultations"
     headers = {
         "Content-Type": "application/json;charset=UTF-8",
@@ -95,35 +119,55 @@ def fetch_and_filter_aws(token):
                     acheteur = marche.get("acheteurNom", "Inconnu")
                     lots = marche.get("lots") or []
                     
-                    texte_a_analyser = titre.lower()
-                    description_lots_texte = ""
-                    
-                    for lot in lots:
-                        libelle_lot = lot.get("libelle") or ""
-                        numero_lot = lot.get("numero", "?")
-                        texte_a_analyser += f" {libelle_lot.lower()}"
-                        description_lots_texte += f"Lot {numero_lot} : {libelle_lot}\n"
-                    
-                    # Filtre OU logique
-                    est_pertinent = any(mot.lower() in texte_a_analyser for mot in CONFIG["mots_cles"])
-                    
-                    if est_pertinent:
-                        statut_actuel = "Normal"
-                        if marche.get("annule"):
-                            statut_actuel = f"ANNULÉ le {marche.get('annule')[:10]}"
-                        elif marche.get("rectifie"):
-                            statut_actuel = f"RECTIFIÉ le {marche.get('rectifie')[:10]}"
+                    # --- FILTRE 1 : ACHETEUR ---
+                    if CONFIG["filtre_acheteur"]["actif"]:
+                        acheteur_lower = acheteur.lower()
+                        # Vérifie si au moins un des acheteurs cibles est dans le nom de l'acheteur actuel
+                        if not any(cible.lower() in acheteur_lower for cible in CONFIG["filtre_acheteur"]["liste_cibles"]):
+                            continue # On passe au marché suivant
                             
-                        ao_structure = {
-                            "reference": marche.get("referenceAWS"),
-                            "statut": statut_actuel,
-                            "titre": titre,
-                            "acheteur": acheteur,
-                            "description_lots": description_lots_texte.strip() if description_lots_texte else "Marché global (sans lots)",
-                            "date_limite": marche.get("dateExp"),
-                            "lien_dce": marche.get("urlAnnonce")
-                        }
-                        appels_offres_pertinents.append(ao_structure)
+                    # --- FILTRE 2 : MOTS-CLÉS SÉPARÉS ---
+                    est_pertinent = False 
+                    
+                    # A. Vérification dans le TITRE
+                    if CONFIG["filtre_mots_cles"]["recherche_dans_titre"]:
+                        texte_titre = titre.lower()
+                        if any(mot.lower() in texte_titre for mot in CONFIG["filtre_mots_cles"]["mots_cles_titre"]):
+                            est_pertinent = True
+                            
+                    # B. Vérification dans les LOTS (si pas déjà validé par le titre)
+                    if not est_pertinent and CONFIG["filtre_mots_cles"]["recherche_dans_lots"]:
+                        # On regroupe tous les libellés de lots en un seul texte pour la vérification
+                        texte_lots = " ".join([lot.get("libelle", "").lower() for lot in lots])
+                        if any(mot.lower() in texte_lots for mot in CONFIG["filtre_mots_cles"]["mots_cles_lots"]):
+                            est_pertinent = True
+                    
+                    # Si ni le titre ni les lots ne correspondent, on passe au marché suivant
+                    # (Sauf si l'utilisateur a désactivé les deux recherches = on prend tout)
+                    if not est_pertinent and (CONFIG["filtre_mots_cles"]["recherche_dans_titre"] or CONFIG["filtre_mots_cles"]["recherche_dans_lots"]):
+                        continue
+                    
+                    # --- SAUVEGARDE SI VALIDÉ ---
+                    description_lots_texte = ""
+                    for lot in lots:
+                        description_lots_texte += f"Lot {lot.get('numero', '?')} : {lot.get('libelle', '')}\n"
+                        
+                    statut_actuel = "Normal"
+                    if marche.get("annule"):
+                        statut_actuel = f"ANNULÉ le {marche.get('annule')[:10]}"
+                    elif marche.get("rectifie"):
+                        statut_actuel = f"RECTIFIÉ le {marche.get('rectifie')[:10]}"
+                        
+                    ao_structure = {
+                        "reference": marche.get("referenceAWS"),
+                        "statut": statut_actuel,
+                        "titre": titre,
+                        "acheteur": acheteur,
+                        "description_lots": description_lots_texte.strip() if description_lots_texte else "Marché global (sans lots)",
+                        "date_limite": marche.get("dateExp"),
+                        "lien_dce": marche.get("urlAnnonce")
+                    }
+                    appels_offres_pertinents.append(ao_structure)
                         
                 print(f"   ↳ Page {page_actuelle + 1}/{pages_totales} analysée.")
                 page_actuelle += 1
@@ -152,5 +196,4 @@ if __name__ == "__main__":
         
         if resultats:
             print("Exemple des 3 premiers marchés correspondants à tes critères :")
-            # Modification ici : resultats[:3] prend les éléments de l'index 0 à 2
             print(json.dumps(resultats[:3], indent=4, ensure_ascii=False))

@@ -18,8 +18,14 @@ from __future__ import annotations
 
 from supabase import Client
 
-from features import extraire_et_stocker_features, knn_like_ratio, similarite_cosinus
-from listes_partagees import charger_mots_cles
+from features import (
+    existe_apprentissage_proche,
+    extraire_et_stocker_features,
+    knn_like_ratio,
+    marquer_appris,
+    similarite_cosinus,
+)
+from listes_partagees import charger_mots_cles, charger_mots_cles_lots
 from modele_preference import (
     apprendre_a,
     apprendre_b,
@@ -34,8 +40,9 @@ NOM_TABLE_OFFRES = "appels_offres"
 NOM_TABLE_RAISONS = "raisons"
 NOM_TABLE_SWIPES = "swipes"
 
-# accepted -> like ; rejected / rejected (for now) -> dislike (voir recap.md
-# pour la distinction avec la table `raisons`, qui garde la décision d'origine).
+# accepted -> like ; rejected -> dislike (voir recap.md pour la distinction
+# avec la table `raisons`, qui garde la décision d'origine). "rejected (for
+# now)" a existé un temps côté UI mais a été retiré (décision inutile).
 DECISIONS_POSITIVES = {"accepted"}
 
 
@@ -44,13 +51,21 @@ def _features_b_avec_signaux(client: Client, features: dict, etat_b: dict) -> di
     (centroïdes, kNN), calculés à partir de l'état ACTUEL (avant tout
     apprentissage sur l'exemple en cours — évite toute fuite de la décision
     dans sa propre feature).
+
+    L'avis lui-même est exclu de son propre calcul de kNN
+    (`knn_like_ratio(..., appel_offre_id=...)`) : sans ça, un avis déjà
+    swipé par un autre utilisateur (file de tri indépendante par
+    utilisateur) se retrouverait son propre voisin à similarité 1.0, ce qui
+    fuirait directement l'étiquette dans sa propre feature — voir recap.md
+    "Anti-doublons / anti-fuite".
     """
     embedding = features.get("embedding") or []
+    appel_offre_id = features.get("appel_offre_id")
     features_b = dict(features)
     features_b["sim_centroide_like"] = similarite_cosinus(embedding, etat_b.get("centroide_like"))
     features_b["sim_centroide_dislike"] = similarite_cosinus(embedding, etat_b.get("centroide_dislike"))
     if etat_b["nb_swipes_vus"] >= 30:  # inutile de payer l'appel RPC pendant le cold start
-        features_b["knn_like_ratio"] = knn_like_ratio(client, embedding)
+        features_b["knn_like_ratio"] = knn_like_ratio(client, embedding, appel_offre_id)
     else:
         features_b["knn_like_ratio"] = 0.5
     return features_b
@@ -60,6 +75,7 @@ def predict_score(
     client: Client,
     offre: dict,
     mots_cles: list[str],
+    mots_cles_lots: list[str] | None = None,
     etat_a: dict | None = None,
     etat_b: dict | None = None,
     profil_embedding: list[float] | None = None,
@@ -75,7 +91,7 @@ def predict_score(
     if profil_embedding is None:
         profil_embedding = charger_ou_calculer_profil(client)
 
-    features = extraire_et_stocker_features(client, offre, mots_cles)
+    features = extraire_et_stocker_features(client, offre, mots_cles, mots_cles_lots)
     features_b = _features_b_avec_signaux(client, features, etat_b)
 
     objet = offre.get("objet") or ""
@@ -102,9 +118,10 @@ def update_model(
     """Enregistre une décision de swipe et entraîne les deux modèles partagés.
 
     `decision` est la décision "métier" telle qu'affichée sur le site
-    (accepted / rejected / rejected (for now)) — binarisée ici en
-    like/dislike pour la table `swipes` et l'entraînement, tout en gardant
-    la décision d'origine + le commentaire dans `raisons` (étape 4).
+    (accepted / rejected — "rejected (for now)" a existé un temps mais a été
+    retiré, décision jugée inutile) — binarisée ici en like/dislike pour la
+    table `swipes` et l'entraînement, tout en gardant la décision d'origine
+    + le commentaire dans `raisons` (étape 4).
 
     `user_id` identifie qui a swipé (texte libre saisi sur le site, pas
     d'authentification — voir recap.md). Chaque utilisateur a sa propre file
@@ -113,9 +130,21 @@ def update_model(
     confondus) mais n'est PLUS ce qui détermine la file de qui que ce soit
     (voir `app.py::charger_offre_suivante`, basée sur `swipes` par `user_id`).
 
-    Renvoie True si l'entraînement a réussi, False s'il a échoué (le swipe
-    est dans tous les cas déjà enregistré avant que l'entraînement soit
-    tenté — voir commentaire ci-dessous).
+    Anti-doublons (voir recap.md "Anti-doublons / anti-fuite") :
+    - `swipes` est en `upsert` sur `(appel_offre_id, user_id)` : un même
+      utilisateur ne peut jamais compter deux fois pour le même avis (double
+      clic, re-render Streamlit) — voir schema_v5_antidoublons.sql.
+    - Un avis (ou un quasi-doublon détecté par similarité d'embedding) n'est
+      appris par les modèles qu'UNE SEULE FOIS, quel que soit le nombre
+      d'utilisateurs qui le swipent (`existe_apprentissage_proche` +
+      `marquer_appris`) — sinon un même contenu pèserait plusieurs fois
+      dans le centroïde/le gradient de la régression.
+
+    Renvoie True si l'écriture du swipe et le traitement (entraînement
+    effectif ou saut volontaire pour cause de doublon) se sont déroulés sans
+    erreur, False si une exception a été levée pendant la partie IA (le
+    swipe est dans tous les cas déjà enregistré avant que l'entraînement
+    soit tenté — voir commentaire ci-dessous).
     """
     aime = decision in DECISIONS_POSITIVES
 
@@ -132,11 +161,17 @@ def update_model(
         "user_id": user_id,
     }).execute()
 
-    client.table(NOM_TABLE_SWIPES).insert({
-        "appel_offre_id": appel_offre_id,
-        "decision": "like" if aime else "dislike",
-        "user_id": user_id,
-    }).execute()
+    # upsert (pas insert) : protège contre un double clic/re-render qui
+    # enverrait deux fois le même (appel_offre_id, user_id) — voir
+    # schema_v5_antidoublons.sql (contrainte UNIQUE correspondante).
+    client.table(NOM_TABLE_SWIPES).upsert(
+        {
+            "appel_offre_id": appel_offre_id,
+            "decision": "like" if aime else "dislike",
+            "user_id": user_id,
+        },
+        on_conflict="appel_offre_id,user_id",
+    ).execute()
 
     # --- Apprentissage des deux modèles (best-effort) ---
     # États chargés APRÈS les écritures ci-dessus (le swipe qu'on vient
@@ -144,9 +179,17 @@ def update_model(
     # reflètent bien l'historique précédent cet exemple, pas de fuite).
     try:
         mots_cles = charger_mots_cles(client)
+        mots_cles_lots = charger_mots_cles_lots(client)
         offre = client.table(NOM_TABLE_OFFRES).select("*").eq("id", appel_offre_id).single().execute().data
-        features = extraire_et_stocker_features(client, offre, mots_cles)
+        features = extraire_et_stocker_features(client, offre, mots_cles, mots_cles_lots)
         embedding = features.get("embedding") or []
+
+        # Cet avis (ou un quasi-doublon de contenu) a-t-il déjà servi à
+        # entraîner les modèles ? Si oui, on ne le réapprend pas (voir
+        # docstring ci-dessus) — le swipe reste enregistré dans
+        # `swipes`/`raisons`, juste pas réinjecté dans les modèles.
+        if existe_apprentissage_proche(client, embedding):
+            return True
 
         etat_a = charger_modele(client, "A")
         etat_b = charger_modele(client, "B")
@@ -158,6 +201,8 @@ def update_model(
 
         apprendre_b(etat_b, features_b, embedding, aime)
         sauvegarder_modele(client, "B", etat_b)
+
+        marquer_appris(client, appel_offre_id)
         return True
     except Exception as exc:
         # Le swipe est déjà en base (raisons + swipes) à ce stade — on ne le
@@ -175,12 +220,16 @@ def recalculer_tous_les_scores(client: Client) -> int:
     mots-clés et les modèles actuels (chargés une seule fois pour tout le lot).
     """
     mots_cles = charger_mots_cles(client)
+    mots_cles_lots = charger_mots_cles_lots(client)
     etat_a = charger_modele(client, "A")
     etat_b = charger_modele(client, "B")
     profil_embedding = charger_ou_calculer_profil(client)
 
     offres = client.table(NOM_TABLE_OFFRES).select("*").execute().data
     for offre in offres:
-        predict_score(client, offre, mots_cles, etat_a=etat_a, etat_b=etat_b, profil_embedding=profil_embedding)
+        predict_score(
+            client, offre, mots_cles, mots_cles_lots,
+            etat_a=etat_a, etat_b=etat_b, profil_embedding=profil_embedding,
+        )
 
     return len(offres)

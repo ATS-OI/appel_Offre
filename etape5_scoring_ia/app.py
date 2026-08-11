@@ -13,8 +13,10 @@ Fonctionnalités :
   - Identification légère (nom saisi, pas d'authentification) : chaque
     utilisateur a sa PROPRE file de tri, indépendante des autres — si Alice
     accepte un avis, il reste "à trier" pour Bob (voir recap.md).
-  - Gestion des mots-clés et acheteurs suivis (pilotent uniquement le
-    périmètre de recherche BOAMP/TED, pas le score — voir recap.md).
+  - Gestion des mots-clés (objet), mots-clés lots (détail des lots) et
+    acheteurs suivis — pilotent le périmètre de recherche BOAMP/TED
+    (filtrage côté client, voir recap.md), et contribuent aussi au scoring
+    IA (`score_mots_cles`/`score_mots_cles_lots`, features parmi d'autres).
   - "🔍 Lancer la recherche" : pipeline complet (récupération + scoring IA
     des 2 modèles + insertion).
   - "🔄 Recalculer les scores" : recalcule les 2 scores de tous les avis en
@@ -58,7 +60,6 @@ NOM_TABLE_SWIPES = "swipes"
 DECISIONS: dict[str, str] = {
     "✅ Accepter": "accepted",
     "❌ Rejeter": "rejected",
-    "⏳ Pour l'instant": "rejected (for now)",
 }
 
 
@@ -82,14 +83,14 @@ def _ids_deja_swipes(client: Client, user_id: str) -> set[str]:
     file : c'est désormais `swipes.user_id` qui fait foi, par utilisateur.
     """
     reponse = client.table(NOM_TABLE_SWIPES).select("appel_offre_id").eq("user_id", user_id).execute()
-    return {ligne["appel_offre_id"] for ligne in reponse.data}
+    return {ligne["appel_offre_id"] for ligne in reponse.data} # type: ignore
 
 
 def charger_offres_a_trier(client: Client, user_id: str) -> list[dict]:
     """Avis que CET utilisateur n'a pas encore swipés."""
     deja_swipes = _ids_deja_swipes(client, user_id)
     toutes_les_offres = client.table(NOM_TABLE).select("*").execute().data
-    return [o for o in toutes_les_offres if o["id"] not in deja_swipes]
+    return [o for o in toutes_les_offres if o["id"] not in deja_swipes] # type: ignore
 
 
 def charger_offre_suivante(client: Client, user_id: str) -> dict | None:
@@ -169,7 +170,7 @@ with st.sidebar:
             ajouter_acheteur_suivi(client, nouvel_acheteur)
             st.rerun()
 
-    st.caption("Mots-clés lots (préparation — pas encore utilisé dans la recherche)")
+    st.caption("Mots-clés lots (recherchés dans le détail des lots de chaque marché, pas seulement son objet — voir recap.md)")
     mots_cles_lots = charger_mots_cles_lots(client)
     cols = st.columns(3)
     for i, mot in enumerate(mots_cles_lots):
@@ -228,6 +229,18 @@ else:
             texte_affiche = description[:LONGUEUR_MAX_AFFICHEE] + "…" if tronquee else description
             st.caption(texte_affiche)
 
+        # Lots (voir recupDataBaseOfficial.py) : sur un marché multi-lots,
+        # l'objet est souvent générique — le détail utile est ici. Tronqué
+        # comme la description (contrainte "tout visible sans scroller").
+        lots = offre.get("lots") or []
+        if lots:
+            LONGUEUR_MAX_LOTS = 300
+            titres_lots = [lot.get("titre") or lot.get("identifiant") or "?" for lot in lots]
+            texte_lots = f"📦 {len(lots)} lot(s) : " + " · ".join(titres_lots)
+            if len(texte_lots) > LONGUEUR_MAX_LOTS:
+                texte_lots = texte_lots[:LONGUEUR_MAX_LOTS] + "…"
+            st.caption(texte_lots)
+
         departements = [str(d) for d in (offre.get("departement") or [])]
         col_info, col_score_a, col_score_b = st.columns([3, 1, 1])
         with col_info:
@@ -257,10 +270,9 @@ else:
             height=80,
         )
 
-        col_rejeter, col_pourlinstant, col_accepter = st.columns(3)
+        col_rejeter, col_accepter = st.columns(2)
         boutons = {
             col_rejeter: "❌ Rejeter",
-            col_pourlinstant: "⏳ Pour l'instant",
             col_accepter: "✅ Accepter",
         }
         for col, libelle in boutons.items():
