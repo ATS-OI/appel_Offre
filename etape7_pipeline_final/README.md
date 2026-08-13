@@ -100,14 +100,15 @@ gérer de serveur soi-même :
    seul au premier lancement de la source AWS (voir
    `sources/aws_solutions.py::_assurer_navigateur_installe`), Streamlit
    Cloud n'exécutant pas cette étape automatiquement contrairement à
-   `pip install`. La liste de `packages.txt` correspond à l'image Debian
-   utilisée par Streamlit Cloud au moment de l'écriture de ce fichier — si
-   une bibliothèque manque encore (message `error while loading shared
-   libraries: xxx.so.N: cannot open shared object file`), ajoutez le paquet
-   apt correspondant à `packages.txt` (l'encadré rouge affiché sur le site
-   donne le nom exact de la bibliothèque manquante) et redéployez. Si la
-   source AWS échoue quand même, le reste du site continue de fonctionner
-   normalement (voir "panne d'une source" ci-dessus) — dans ce
+   `pip install`. `packages.txt` installe le paquet `chromium` du système
+   (pas utilisé directement — Playwright garde son propre navigateur
+   téléchargé) uniquement pour récupérer, en une fois, toutes les
+   bibliothèques partagées dont ce navigateur a besoin pour démarrer :
+   plus robuste que lister les bibliothèques une par une (leurs noms exacts
+   changent d'une version de Debian à l'autre, et si un seul nom est faux,
+   `apt-get install` échoue pour toute la liste). Si la source AWS échoue
+   quand même, le reste du site continue de fonctionner normalement (voir
+   "panne d'une source" ci-dessus) — dans ce
    cas, hébergez plutôt via Docker/VM (option ci-dessous), qui n'a pas cette
    limite.
 6. Le lien fourni par Streamlit Cloud (ex.

@@ -29,6 +29,21 @@ _SOURCES = [
 ]
 
 
+# Longueur max du détail technique affiché à l'utilisateur (encadré rouge/
+# fenêtre de progression) — certaines erreurs (ex. Playwright qui recopie
+# tout le log de démarrage du navigateur) font plusieurs dizaines de lignes ;
+# le détail complet reste dans la console (`print`), seul l'affichage
+# utilisateur est raccourci.
+LONGUEUR_MAX_DETAIL = 200
+
+
+def _tronquer(texte: str, longueur_max: int = LONGUEUR_MAX_DETAIL) -> str:
+    texte = str(texte).strip()
+    if len(texte) <= longueur_max:
+        return texte
+    return texte[:longueur_max].rstrip() + "…"
+
+
 def message_erreur_source(nom: str, fichier: str, exc: Exception) -> str:
     """Texte affiché à l'utilisateur (encadré rouge côté app.py) quand une
     source échoue — ne bloque jamais les autres sources."""
@@ -37,7 +52,7 @@ def message_erreur_source(nom: str, fichier: str, exc: Exception) -> str:
         f"il se pourrait que le site ait changé ou qu'une erreur de connexion à la page "
         f"soit survenue. Allez dans le fichier `sources/{fichier}` ou contactez un "
         f"administrateur pour avoir plus de détails sur le problème. "
-        f"(Détail technique : {exc})"
+        f"(Détail technique : {_tronquer(exc)})"
     )
 
 
@@ -71,7 +86,9 @@ def recuperer_toutes_les_offres(
         try:
             resultats = fonction(departements, seulement_ouverts)
         except Exception as exc:
-            annoncer(f"❌ {nom} a échoué : {exc}")
+            print(f"❌ {nom} a échoué : {exc}")  # détail complet réservé à la console
+            if on_progress:
+                on_progress(f"❌ {nom} a échoué : {_tronquer(exc)}")
             if on_erreur:
                 on_erreur(nom, message_erreur_source(nom, fichier, exc))
             continue
