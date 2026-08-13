@@ -93,14 +93,18 @@ gérer de serveur soi-même :
    EMAIL_AWS = "..."
    MOT_DE_PASSE_AWS = "..."
    ```
-5. Déployez. Streamlit Cloud installe automatiquement `requirements.txt` et
-   exécute `playwright install` s'il détecte la dépendance — si la source
-   AWS échoue au déploiement (le bac à sable de Streamlit Cloud peut limiter
-   les navigateurs headless), le reste du site continue de fonctionner
-   normalement (voir "panne d'une source" ci-dessus) ; dans ce cas, retirez
-   `playwright` de `requirements.txt` et acceptez que la source AWS reste
-   désactivée sur le déploiement en ligne, ou hébergez plutôt via Docker/VM
-   (option ci-dessous) qui n'a pas cette limite.
+5. Déployez. Streamlit Cloud installe automatiquement `requirements.txt`
+   (dépendances Python) et `packages.txt` (bibliothèques système nécessaires
+   à Chromium headless, pour la source AWS) — le téléchargement du
+   navigateur lui-même (`playwright install chromium`) se déclenche tout
+   seul au premier lancement de la source AWS (voir
+   `sources/aws_solutions.py::_assurer_navigateur_installe`), Streamlit
+   Cloud n'exécutant pas cette étape automatiquement contrairement à
+   `pip install`. Si la source AWS échoue quand même (bac à sable qui bloque
+   le téléchargement du navigateur au runtime), le reste du site continue de
+   fonctionner normalement (voir "panne d'une source" ci-dessus) — dans ce
+   cas, hébergez plutôt via Docker/VM (option ci-dessous), qui n'a pas cette
+   limite.
 6. Le lien fourni par Streamlit Cloud (ex.
    `https://appel-offre-ats-oi.streamlit.app`) est celui à partager à toute
    l'équipe — un simple favori dans le navigateur suffit, aucune

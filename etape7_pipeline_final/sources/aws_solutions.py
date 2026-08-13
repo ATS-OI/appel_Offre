@@ -23,6 +23,7 @@ la récupération des 3 autres sources.
 from __future__ import annotations
 
 import os
+import subprocess
 from datetime import datetime, timezone
 
 import requests
@@ -32,6 +33,28 @@ from .commun import normaliser_date
 URL_LOGIN = "https://awsolutions.fr/apr/"
 URL_API = "https://awsolutions.fr/apiSelenee/apiSearch/searchConsultations"
 
+_navigateur_verifie = False
+
+
+def _assurer_navigateur_installe() -> None:
+    """S'assure que le navigateur headless Chromium (nécessaire à Playwright)
+    est bien installé avant de l'utiliser.
+
+    En local/VM, l'installation se fait une fois pour toutes via `playwright
+    install chromium` (voir README.md). Sur certains hébergeurs (ex.
+    Streamlit Community Cloud), cette étape n'est JAMAIS exécutée
+    automatiquement — seul `pip install -r requirements.txt` l'est — d'où
+    l'erreur "Executable doesn't exist..." au premier lancement. On la
+    déclenche donc ici, une fois par process : `playwright install` est
+    déjà idempotent (quasi instantané s'il est déjà installé), donc sans
+    coût perceptible les fois suivantes.
+    """
+    global _navigateur_verifie
+    if _navigateur_verifie:
+        return
+    subprocess.run(["playwright", "install", "chromium"], check=False, capture_output=True)
+    _navigateur_verifie = True
+
 
 def _recuperer_token() -> str:
     """Se connecte au site via un navigateur headless (Playwright) et
@@ -40,6 +63,8 @@ def _recuperer_token() -> str:
     mot_de_passe = os.environ.get("MOT_DE_PASSE_AWS")
     if not email or not mot_de_passe:
         raise RuntimeError("EMAIL_AWS et/ou MOT_DE_PASSE_AWS manquants dans .env — voir .env.example.")
+
+    _assurer_navigateur_installe()
 
     from playwright.sync_api import sync_playwright
 
