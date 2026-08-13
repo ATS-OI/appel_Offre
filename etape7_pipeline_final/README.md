@@ -100,9 +100,14 @@ gérer de serveur soi-même :
    seul au premier lancement de la source AWS (voir
    `sources/aws_solutions.py::_assurer_navigateur_installe`), Streamlit
    Cloud n'exécutant pas cette étape automatiquement contrairement à
-   `pip install`. Si la source AWS échoue quand même (bac à sable qui bloque
-   le téléchargement du navigateur au runtime), le reste du site continue de
-   fonctionner normalement (voir "panne d'une source" ci-dessus) — dans ce
+   `pip install`. La liste de `packages.txt` correspond à l'image Debian
+   utilisée par Streamlit Cloud au moment de l'écriture de ce fichier — si
+   une bibliothèque manque encore (message `error while loading shared
+   libraries: xxx.so.N: cannot open shared object file`), ajoutez le paquet
+   apt correspondant à `packages.txt` (l'encadré rouge affiché sur le site
+   donne le nom exact de la bibliothèque manquante) et redéployez. Si la
+   source AWS échoue quand même, le reste du site continue de fonctionner
+   normalement (voir "panne d'une source" ci-dessus) — dans ce
    cas, hébergez plutôt via Docker/VM (option ci-dessous), qui n'a pas cette
    limite.
 6. Le lien fourni par Streamlit Cloud (ex.
