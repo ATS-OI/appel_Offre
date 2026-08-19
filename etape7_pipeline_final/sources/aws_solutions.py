@@ -23,37 +23,20 @@ la récupération des 3 autres sources.
 from __future__ import annotations
 
 import os
-import subprocess
 from datetime import datetime, timezone
 
 import requests
 
-from .commun import normaliser_date
+try:
+    from .commun import assurer_navigateur_installe, normaliser_date
+except ImportError:
+    # Lancé directement (`python sources/aws_solutions.py` ou bouton "Run"
+    # de l'IDE) plutôt qu'en module (`python -m sources.aws_solutions`) —
+    # voir boamp.py pour le détail de ce repli.
+    from commun import assurer_navigateur_installe, normaliser_date
 
 URL_LOGIN = "https://awsolutions.fr/apr/"
 URL_API = "https://awsolutions.fr/apiSelenee/apiSearch/searchConsultations"
-
-_navigateur_verifie = False
-
-
-def _assurer_navigateur_installe() -> None:
-    """S'assure que le navigateur headless Chromium (nécessaire à Playwright)
-    est bien installé avant de l'utiliser.
-
-    En local/VM, l'installation se fait une fois pour toutes via `playwright
-    install chromium` (voir README.md). Sur certains hébergeurs (ex.
-    Streamlit Community Cloud), cette étape n'est JAMAIS exécutée
-    automatiquement — seul `pip install -r requirements.txt` l'est — d'où
-    l'erreur "Executable doesn't exist..." au premier lancement. On la
-    déclenche donc ici, une fois par process : `playwright install` est
-    déjà idempotent (quasi instantané s'il est déjà installé), donc sans
-    coût perceptible les fois suivantes.
-    """
-    global _navigateur_verifie
-    if _navigateur_verifie:
-        return
-    subprocess.run(["playwright", "install", "chromium"], check=False, capture_output=True)
-    _navigateur_verifie = True
 
 
 def _recuperer_token() -> str:
@@ -64,7 +47,7 @@ def _recuperer_token() -> str:
     if not email or not mot_de_passe:
         raise RuntimeError("EMAIL_AWS et/ou MOT_DE_PASSE_AWS manquants dans .env — voir .env.example.")
 
-    _assurer_navigateur_installe()
+    assurer_navigateur_installe()
 
     from playwright.sync_api import sync_playwright
 
@@ -154,3 +137,31 @@ def recuperer(departements: list[str], seulement_ouverts: bool = True, limit: in
         page_actuelle += 1
 
     return resultats
+
+
+if __name__ == "__main__":
+    # Test manuel : `python -m sources.aws_solutions` OU
+    # `python sources/aws_solutions.py` (depuis etape7_pipeline_final/, ou
+    # bouton "Run" de l'IDE) — les deux marchent (voir le try/except
+    # d'import de `commun` en tête de fichier).
+    # Nécessite EMAIL_AWS/MOT_DE_PASSE_AWS dans l'environnement — sans ça, le
+    # chemin d'erreur "identifiants manquants" est testé à la place (c'est le
+    # chemin emprunté par ce module tant que le compte n'est pas configuré).
+    import json
+
+    from dotenv import load_dotenv
+
+    load_dotenv()  # ok ici : script autonome, pas importé par le reste de l'appli
+
+    print("=" * 70)
+    print("sources/aws_solutions.py — test manuel")
+    print("=" * 70)
+    try:
+        resultats = recuperer(["974", "976"], seulement_ouverts=True, limit=20)
+        print(f"\n{len(resultats)} résultat(s).")
+        if resultats:
+            print(json.dumps(resultats[0], ensure_ascii=False, indent=2))
+    except RuntimeError as exc:
+        print(f"\n⚠️ Chemin d'erreur attendu si les identifiants ne sont pas configurés : {exc}")
+    except Exception as exc:
+        print(f"\n❌ Erreur inattendue : {type(exc).__name__}: {exc}")

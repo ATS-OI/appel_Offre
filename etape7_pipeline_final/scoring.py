@@ -140,6 +140,20 @@ def calculer_embedding(texte: str) -> list[float]:
     return modele.encode(texte, normalize_embeddings=True).tolist()
 
 
+def similarite_cosinus(a: list[float] | None, b: list[float] | None) -> float:
+    """Similarité cosinus entre deux embeddings (0 = rien à voir, 1 =
+    identiques). Les embeddings de ce module sont déjà normalisés
+    (`normalize_embeddings=True`), donc un simple produit scalaire suffit —
+    robuste si l'un des deux est vide/absent. Fonction pure, aucune
+    dépendance réseau : utilisée par `bac_a_sable_embedding.py` pour
+    explorer un seuil de similarité (ex. pour repérer des doublons entre
+    sources qui reformulent le même avis, voir sources/commun.py).
+    """
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    return float(sum(x * y for x, y in zip(a, b)))
+
+
 def _parser_vecteur(valeur: object) -> list[float] | None:
     """PostgREST renvoie parfois les colonnes `vector` en texte brut plutôt
     qu'en liste déjà parsée — sans cette normalisation, itérer dessus itère

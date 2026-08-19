@@ -1,9 +1,9 @@
 """
-sources/commun.py — normalisation partagée entre les 4 sources
+sources/commun.py — normalisation partagée entre les 5 sources
 ================================================================================
 
-Chaque source (boamp.py, ted.py, aws_solutions.py, place.py) renvoie une
-liste de dicts au MÊME format :
+Chaque source (boamp.py, ted.py, aws_solutions.py, place.py, e_marche.py)
+renvoie une liste de dicts au MÊME format :
 
     {
         "source": "BOAMP",                # nom de la source
@@ -18,21 +18,70 @@ liste de dicts au MÊME format :
         "url": "...",
     }
 
-Ce fichier regroupe tout ce qui est commun aux 4 sources : normalisation de
+Ce fichier regroupe tout ce qui est commun aux 5 sources : normalisation de
 texte, fusion des doublons (un même marché republié/rectifié plusieurs fois,
-y compris à cheval entre deux sources) et le filtre final mots-clés/lots/
-acheteurs suivis.
+y compris à cheval entre deux sources — e-marchespublics agrège lui-même
+BOAMP/JOUE, donc ce cas est particulièrement fréquent entre EMP et
+BOAMP/TED) et le filtre final mots-clés/lots/acheteurs suivis.
+
+Contient aussi `assurer_navigateur_installe()`, utilisé par les 2 sources
+qui ont besoin d'un navigateur headless (aws_solutions.py, e_marche.py) —
+factorisé ici pour ne pas dupliquer le contournement Streamlit Cloud (voir
+sa docstring) dans chaque fichier.
 """
 
 from __future__ import annotations
 
 import re
+import subprocess
+import sys
 import unicodedata
 from difflib import SequenceMatcher
+
+# Le bac à sable ci-dessous (bloc `__main__`) imprime des accents/emoji —
+# plante sur une console Windows par défaut (cp1252) sans ce garde-fou.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 # Seuil de similarité (0-1, via difflib) au-dessus duquel deux objets d'avis
 # (même acheteur) sont considérés comme le même dossier républié/corrigé.
 SEUIL_SIMILARITE_OBJET = 0.80
+
+_navigateur_verifie = False
+
+
+def assurer_navigateur_installe() -> None:
+    """S'assure que le navigateur headless Chromium (nécessaire à Playwright)
+    est bien installé avant de l'utiliser — appelé par les sources qui font
+    du login navigateur (aws_solutions.py, e_marche.py).
+
+    En local/VM, l'installation se fait une fois pour toutes via `playwright
+    install chromium` (voir README.md). Sur certains hébergeurs (ex.
+    Streamlit Community Cloud), cette étape n'est JAMAIS exécutée
+    automatiquement — seul `pip install -r requirements.txt` l'est — d'où
+    l'erreur "Executable doesn't exist..." au premier lancement. On la
+    déclenche donc ici, une fois par process : `playwright install` est
+    déjà idempotent (quasi instantané s'il est déjà installé), donc sans
+    coût perceptible les fois suivantes.
+
+    `sys.executable -m playwright` plutôt que la commande `playwright` nue :
+    cette dernière suppose que le script CLI est sur le PATH, ce qui n'est
+    pas garanti selon comment le package a été installé (bug rencontré en
+    pratique en local : `FileNotFoundError` alors que le package Python
+    `playwright` était bien installé) — `-m` passe par l'interpréteur
+    Python en cours d'exécution, toujours correct. Le tout est en best-effort
+    (`try/except`) : si ça échoue quand même, le vrai lancement du
+    navigateur juste après donnera de toute façon une erreur claire,
+    remontée normalement par `sources/__init__.py`.
+    """
+    global _navigateur_verifie
+    if _navigateur_verifie:
+        return
+    try:
+        subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=False, capture_output=True)
+    except Exception:
+        pass
+    _navigateur_verifie = True
 
 
 def normaliser_texte(texte: str) -> str:
@@ -219,3 +268,77 @@ def normaliser_date(valeur: str) -> str:
     if not valeur:
         return ""
     return valeur[:10]
+
+
+# =====================================================================
+# Bac à sable manuel — `python commun.py` (ou `python -m sources.commun`
+# depuis etape7_pipeline_final/) : teste chaque fonction de ce fichier sur
+# des données fabriquées, sans réseau ni Supabase.
+# =====================================================================
+
+if __name__ == "__main__":
+    print("=" * 70)
+    print("commun.py — bac à sable manuel")
+    print("=" * 70)
+
+    print("\n--- normaliser_texte / normaliser_date : cas limites ---")
+    for cas in ["Rénovation ÉCOLE", "  espaces   multiples  ", "", None]:
+        print(f"  {cas!r:35} -> {normaliser_texte(cas)!r}")
+    for cas in ["2026-08-13T10:00:00+00:00", "2026-08-13", "", None]:
+        print(f"  {cas!r:35} -> {normaliser_date(cas)!r}")
+
+    print("\n--- fusionner_doublons : 5 avis fabriqués ---")
+    # 0 et 1 : même dossier BOAMP, rectificatif lié explicitement (_annonce_lie).
+    # 2 : republication du même marché sur EMP (agrégateur), reformulée -> doit
+    #     fusionner avec 0/1 via la similarité de texte (pas de lien explicite).
+    # 3 : avis TED, acheteur différent -> reste seul.
+    # 4 : avis BOAMP, objet totalement différent -> reste seul.
+    avis_fabriques = [
+        {"source": "BOAMP", "identifiant": "24-0001", "objet": "Rénovation école primaire Saint-Denis",
+         "description": "", "lots": [], "acheteur": "Mairie de Saint-Denis",
+         "departement": "974", "date_parution": "2026-08-01", "date_limite_reponse": "2026-09-01",
+         "url": "https://boamp/24-0001", "_annonce_lie": []},
+        {"source": "BOAMP", "identifiant": "24-0002", "objet": "Rénovation école primaire Saint-Denis (rectificatif)",
+         "description": "", "lots": [], "acheteur": "Mairie de Saint-Denis",
+         "departement": "974", "date_parution": "2026-08-05", "date_limite_reponse": "2026-09-10",
+         "url": "https://boamp/24-0002", "_annonce_lie": ["24-0001"]},
+        {"source": "EMP", "identifiant": "emp-9001", "objet": "Travaux de rénovation de l'école primaire de Saint-Denis",
+         "description": "", "lots": [], "acheteur": "Mairie de Saint-Denis",
+         "departement": "974", "date_parution": "2026-08-02", "date_limite_reponse": "2026-09-01",
+         "url": "https://e-marchespublics/emp-9001", "_annonce_lie": []},
+        {"source": "TED", "identifiant": "ted-1", "objet": "Fourniture de mobilier scolaire",
+         "description": "", "lots": [], "acheteur": "Région Réunion",
+         "departement": "974", "date_parution": "2026-08-01", "date_limite_reponse": "2026-08-20",
+         "url": "https://ted/1", "_annonce_lie": []},
+        {"source": "BOAMP", "identifiant": "24-0099", "objet": "Collecte des déchets ménagers",
+         "description": "", "lots": [], "acheteur": "CIREST",
+         "departement": "974", "date_parution": "2026-08-01", "date_limite_reponse": "2026-10-01",
+         "url": "https://boamp/24-0099", "_annonce_lie": []},
+    ]
+    liens_precis = {i: a["_annonce_lie"] for i, a in enumerate(avis_fabriques) if a["_annonce_lie"]}
+    groupes = fusionner_doublons(avis_fabriques, liens_precis)
+    print(f"  {len(avis_fabriques)} avis fabriqués -> {len(groupes)} groupe(s) après fusion")
+    for g in groupes:
+        print(f"    - {g['objet']!r} (sources={g['source']}, {g['nb_versions']} version(s))")
+    # ⚠️ Remarque volontaire : l'avis EMP (reformulé "Travaux de rénovation
+    # de l'école primaire de Saint-Denis") ne fusionne PAS avec le dossier
+    # BOAMP correspondant malgré le même acheteur — la reformulation fait
+    # tomber la similarité de texte sous SEUIL_SIMILARITE_OBJET (0.80).
+    # C'est exactement le genre de cas qu'une similarité par EMBEDDING
+    # pourrait mieux détecter (le sens est identique, le texte diffère) —
+    # voir bac_a_sable_embedding.py à la racine du dossier.
+
+    print("\n--- trouver_correspondances / est_pertinent ---")
+    avis_test = avis_fabriques[0]
+    cas_filtres = [
+        ("aucun filtre configuré -> tout gardé", [], [], []),
+        ("mot-clé sur l'objet", ["rénovation"], [], []),
+        ("mot-clé sur l'acheteur", [], [], ["Saint-Denis"]),
+        ("mot-clé qui ne matche rien", ["plomberie"], [], []),
+    ]
+    for libelle, mc, mcl, ach in cas_filtres:
+        correspondances = trouver_correspondances(avis_test, mc, mcl, ach)
+        pertinent = est_pertinent(avis_test, mc, mcl, ach)
+        print(f"  {libelle:40} -> pertinent={pertinent}, trouvés={correspondances}")
+
+    print("\nTerminé.")

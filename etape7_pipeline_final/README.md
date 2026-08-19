@@ -1,8 +1,9 @@
 # Appels d'offres — La Réunion / Mayotte
 
 Un site interne qui récupère automatiquement les appels d'offres publics
-publiés sur 4 plateformes (BOAMP, TED/JOUE, AWSolutions, PLACE) pour La
-Réunion et Mayotte, les présente un par un ("à la Tinder") pour que l'équipe
+publiés sur 6 plateformes (BOAMP, TED/JOUE, AWSolutions, PLACE,
+e-marchespublics, AchatPublic) pour La Réunion et Mayotte, les présente un
+par un ("à la Tinder") pour que l'équipe
 les marque "intéressant" ou "pas intéressant", et apprend progressivement à
 mettre en avant les avis qui ressemblent à ceux déjà marqués intéressants.
 
@@ -10,11 +11,11 @@ Pour comprendre comment le code est organisé, voir [structure.md](structure.md)
 
 ## Ce que fait le site
 
-Le site est organisé en 3 onglets :
+Le site est organisé en 4 onglets :
 
 1. **🎯 Trier** : "🔍 Lancer la recherche" (barre latérale) supprime d'abord
    les avis déjà en base dont la date limite de réponse est dépassée
-   (inutiles une fois qu'on ne peut plus y répondre), puis interroge les 4
+   (inutiles une fois qu'on ne peut plus y répondre), puis interroge les 6
    sources pour les départements suivis (974/976 par défaut, voir
    `config.json`) — uniquement les avis encore ouverts — et garde ceux dont
    l'objet, un lot, ou l'acheteur correspond aux mots-clés/acheteurs suivis
@@ -25,11 +26,18 @@ Le site est organisé en 3 onglets :
    dessus, et clique "👍 Intéressant" ou "👎 Pas intéressant", avec un
    commentaire optionnel. Chaque personne a sa propre file : ce qu'Alice
    trie n'affecte pas la file de Bob.
-2. **📋 Historique** : tous les avis en base, avec VOTRE décision indiquée
-   par une couleur (vert = intéressant, rouge = pas intéressant, gris = pas
-   encore trié) — filtrable pour ne voir que les intéressants ou que les
-   pas intéressants.
-3. **🔑 Mots-clés** : gestion des 3 listes partagées (mots-clés objet,
+2. **🆕 Nouveautés** : seulement les avis trouvés depuis la dernière
+   recherche — sauf si une autre recherche a déjà eu lieu le même jour,
+   auquel cas tout ce qui a été trouvé par les recherches du jour reste
+   affiché (relancer une recherche par curiosité n'efface jamais les
+   résultats précédents de la journée). Même outil de tri/filtre que
+   l'Historique (voir ci-dessous).
+3. **📋 Historique** : tous les avis en base, avec VOTRE décision — filtrable
+   (intéressant / pas intéressant / toutes) et triable (score par défaut,
+   ou date de rendu). Cliquer sur un aperçu ouvre sa fiche complète (mêmes
+   détails que l'onglet Trier) dans une fenêtre, en lecture seule — la
+   décision se prend uniquement depuis "Trier".
+4. **🔑 Mots-clés** : gestion des 3 listes partagées (mots-clés objet,
    mots-clés lots, acheteurs suivis) qui pilotent le périmètre de recherche.
 
 Le **score** (sur 100, affiché sur chaque fiche) est au début une estimation
@@ -38,8 +46,8 @@ simple (mots-clés + délai restant). Une fois assez de décisions enregistrées
 d'avis "intéressants" parmi les décisions passées qui ressemblent le plus
 (au sens sémantique) à l'avis en cours — voir `scoring.py`.
 
-Une panne d'une des 4 sources (site indisponible, identifiants manquants...)
-n'empêche jamais les 3 autres de fonctionner : un message rouge s'affiche en
+Une panne d'une des 6 sources (site indisponible, identifiants manquants...)
+n'empêche jamais les 5 autres de fonctionner : un message rouge s'affiche en
 haut du site pour prévenir, avec le fichier à regarder en cas de doute.
 
 ## Lancer le site en local
@@ -49,10 +57,11 @@ Prérequis : Python 3.11+, un projet Supabase.
 ```bash
 cd etape7_pipeline_final
 pip install -r requirements.txt
-playwright install chromium   # une seule fois, nécessaire pour la source AWS
+playwright install chromium   # une seule fois, nécessaire pour AWS et e-marchespublics
 
 cp .env.example .env          # puis remplir SUPABASE_URL / SUPABASE_KEY
-                               # (EMAIL_AWS / MOT_DE_PASSE_AWS optionnels)
+                               # (EMAIL_AWS/MOT_DE_PASSE_AWS et
+                               #  EMAIL_EMP/MOT_DE_PASSE_EMP optionnels)
 
 streamlit run app.py
 ```
@@ -64,10 +73,13 @@ existante), ouvrez l'éditeur SQL et exécutez tout le contenu de
 [`schema.sql`](schema.sql) une seule fois. Il crée toutes les tables (déjà
 préremplies avec le périmètre de recherche connu de l'équipe : mots-clés,
 mots-clés lots, acheteurs suivis), la fonction de recherche par similarité,
-et les permissions nécessaires. Exécutez ensuite
-[`schema2.sql`](schema2.sql) (migration additive, sans risque à rejouer) :
-elle ajoute la colonne qui garde trace des mots-clés ayant fait remonter
-chaque avis (affichée sur la fiche, onglet "🎯 Trier").
+et les permissions nécessaires. Exécutez ensuite, dans l'ordre (migrations
+additives, sans risque à rejouer) :
+- [`schema2.sql`](schema2.sql) : ajoute la colonne qui garde trace des
+  mots-clés ayant fait remonter chaque avis (affichée sur la fiche).
+- [`schema3.sql`](schema3.sql) : ajoute la table `recherches`, qui garde
+  l'heure de chaque "🔍 Lancer la recherche" — utilisée par l'onglet
+  "🆕 Nouveautés" pour savoir ce qui a été trouvé récemment.
 
 ⚠️ Si vous avez une base Supabase existante d'une version précédente du
 projet (`etape5_scoring_ia` ou antérieure) : supprimez toutes les tables
@@ -92,25 +104,26 @@ gérer de serveur soi-même :
    SUPABASE_KEY = "..."
    EMAIL_AWS = "..."
    MOT_DE_PASSE_AWS = "..."
+   EMAIL_EMP = "..."
+   MOT_DE_PASSE_EMP = "..."
    ```
 5. Déployez. Streamlit Cloud installe automatiquement `requirements.txt`
    (dépendances Python) et `packages.txt` (bibliothèques système nécessaires
-   à Chromium headless, pour la source AWS) — le téléchargement du
-   navigateur lui-même (`playwright install chromium`) se déclenche tout
-   seul au premier lancement de la source AWS (voir
-   `sources/aws_solutions.py::_assurer_navigateur_installe`), Streamlit
-   Cloud n'exécutant pas cette étape automatiquement contrairement à
-   `pip install`. `packages.txt` installe le paquet `chromium` du système
-   (pas utilisé directement — Playwright garde son propre navigateur
-   téléchargé) uniquement pour récupérer, en une fois, toutes les
-   bibliothèques partagées dont ce navigateur a besoin pour démarrer :
-   plus robuste que lister les bibliothèques une par une (leurs noms exacts
-   changent d'une version de Debian à l'autre, et si un seul nom est faux,
-   `apt-get install` échoue pour toute la liste). Si la source AWS échoue
-   quand même, le reste du site continue de fonctionner normalement (voir
-   "panne d'une source" ci-dessus) — dans ce
-   cas, hébergez plutôt via Docker/VM (option ci-dessous), qui n'a pas cette
-   limite.
+   à Chromium headless, pour les sources AWS et e-marchespublics) — le
+   téléchargement du navigateur lui-même (`playwright install chromium`) se
+   déclenche tout seul au premier lancement de l'une de ces deux sources
+   (voir `sources/commun.py::assurer_navigateur_installe`), Streamlit Cloud
+   n'exécutant pas cette étape automatiquement contrairement à `pip
+   install`. `packages.txt` installe le paquet `chromium` du système (pas
+   utilisé directement — Playwright garde son propre navigateur téléchargé)
+   uniquement pour récupérer, en une fois, toutes les bibliothèques
+   partagées dont ce navigateur a besoin pour démarrer : plus robuste que
+   lister les bibliothèques une par une (leurs noms exacts changent d'une
+   version de Debian à l'autre, et si un seul nom est faux, `apt-get
+   install` échoue pour toute la liste). Si l'une de ces deux sources
+   échoue quand même, le reste du site continue de fonctionner normalement
+   (voir "panne d'une source" ci-dessus) — dans ce cas, hébergez plutôt via
+   Docker/VM (option ci-dessous), qui n'a pas cette limite.
 6. Le lien fourni par Streamlit Cloud (ex.
    `https://appel-offre-ats-oi.streamlit.app`) est celui à partager à toute
    l'équipe — un simple favori dans le navigateur suffit, aucune
@@ -140,10 +153,32 @@ que `.env`.
 - **AWS** : nécessite un compte AWSolutions valide (`EMAIL_AWS`/
   `MOT_DE_PASSE_AWS`) et un navigateur headless (Playwright) — sans ça,
   cette source échoue proprement, le reste continue.
+- **EMP** (e-marchespublics) : même principe que AWS (compte + navigateur
+  headless requis, `EMAIL_EMP`/`MOT_DE_PASSE_EMP`). e-marchespublics agrège
+  lui-même BOAMP/JOUE : de la redondance avec notre propre source BOAMP est
+  attendue et déjà gérée par la fusion des doublons (voir point suivant).
+- **ACHAT_PUBLIC** (achatpublic.com) : ne prend pas de compte, mais le
+  filtre géographique n'est pas un simple paramètre — c'est un payload de
+  formulaire complet, collé en dur dans `sources/achat_public.py`
+  (`PAYLOAD_RECHERCHE`, déjà rempli pour 974/976). Si le site change son
+  formulaire de recherche, ce payload doit être récupéré à nouveau à la
+  main (voir la note en tête du fichier) et cette source échoue proprement
+  en attendant, le reste continue.
 - **Rapprochement des doublons** (un même marché republié/rectifié, y
   compris entre deux sources différentes) est une heuristique (acheteur +
   similarité de texte), pas un identifiant officiel commun — en cas de
-  doute, vérifier via les liens fournis.
+  doute, vérifier via les liens fournis. Un bac à sable dédié
+  (`bac_a_sable_embedding.py`) permet d'évaluer si une similarité
+  d'embedding ferait mieux, notamment sur les reformulations que
+  l'heuristique texte actuelle peut rater.
+- **Tester une source individuellement** : chaque fichier de `sources/`
+  (`boamp.py`, `ted.py`, `aws_solutions.py`, `place.py`, `e_marche.py`,
+  `achat_public.py`) et `sources/commun.py` peuvent être lancés seuls pour
+  du débogage manuel —
+  voir le bloc `if __name__ == "__main__":` en bas de chaque fichier
+  (invocation : `python sources/<nom>.py` depuis `etape7_pipeline_final/`,
+  ou directement le bouton "Run" de l'IDE — marche aussi en module,
+  `python -m sources.<nom>`).
 - **Score** : le KNN compare aux décisions déjà prises ; avec très peu de
   décisions dans une direction (ex. presque uniquement des rejets), le
   score peut rester peu informatif au-delà de la proportion générale — plus

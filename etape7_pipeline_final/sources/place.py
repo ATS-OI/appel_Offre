@@ -148,3 +148,27 @@ def recuperer(departements: list[str], seulement_ouverts: bool = True, limit: in
             html_courant = BeautifulSoup(reponse_page.text, "html.parser")
 
     return resultats
+
+
+if __name__ == "__main__":
+    # Test manuel : `python -m sources.place` OU `python sources/place.py`
+    # (depuis etape7_pipeline_final/, ou bouton "Run" de l'IDE) — les deux
+    # marchent (ce fichier n'importe rien de `commun.py`, pas de souci
+    # d'import relatif ici).
+    # Pas d'identifiants requis (scraping public), mais plus lent (une
+    # requête réseau supplémentaire par avis à lots, voir _extraire_lots_popup)
+    # — un seul scénario, entouré d'un try/except pour couvrir aussi le
+    # chemin d'erreur (ex. structure HTML du site qui a changé).
+    import json
+
+    print("=" * 70)
+    print("sources/place.py — test manuel")
+    print("=" * 70)
+    try:
+        resultats = recuperer(["974", "976"], seulement_ouverts=True, limit=20)
+        print(f"\n{len(resultats)} résultat(s).")
+        if resultats:
+            print("\nExemple (vérifiez date_limite_reponse/url — voir limites connues en tête de fichier) :")
+            print(json.dumps(resultats[0], ensure_ascii=False, indent=2))
+    except Exception as exc:
+        print(f"\n❌ Erreur : {type(exc).__name__}: {exc}")

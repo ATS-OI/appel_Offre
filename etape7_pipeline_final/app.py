@@ -5,7 +5,7 @@ app.py — site (Streamlit) : le seul point d'entrée utilisateur
 Lancer avec :
     streamlit run app.py
 
-3 onglets :
+4 onglets :
   - "🎯 Trier" : une fiche à la fois parmi les avis que CET utilisateur n'a
     pas encore triés, tirée au hasard (pas triée par score — biaiserait le
     KNN vers les avis déjà "évidents"). Affiche pourquoi l'avis est proposé
@@ -13,13 +13,20 @@ Lancer avec :
     score sur 100. Décision "👍 Intéressant" / "👎 Pas intéressant" +
     commentaire optionnel -> `raisons` (historique) + `swipes`
     (`pipeline.enregistrer_swipe`) — RAPIDE, ne recalcule rien.
+  - "🆕 Nouveautés" : seulement les avis trouvés depuis la dernière
+    recherche (ou depuis la 1ère recherche du jour s'il y en a eu
+    plusieurs aujourd'hui — voir `pipeline.calculer_cutoff_nouveautes` :
+    relancer une recherche le même jour n'efface jamais les résultats
+    trouvés plus tôt dans la journée). Même outil de tri/filtre que
+    l'Historique.
   - "📋 Historique" : tous les avis en base, avec VOTRE décision (chaque
-    utilisateur a sa propre file, indépendante des autres) indiquée par une
-    couleur (vert = intéressant, rouge = pas intéressant, gris = pas encore
-    trié), filtrable.
+    utilisateur a sa propre file, indépendante des autres) — filtrable
+    (intéressant/pas intéressant) et triable (score par défaut, ou date de
+    rendu). Cliquer un aperçu ouvre sa fiche complète en fenêtre modale
+    (lecture seule — la décision se prend uniquement depuis "Trier").
   - "🔑 Mots-clés" : gestion des 3 listes partagées (mots-clés objet,
     mots-clés lots, acheteurs suivis) qui pilotent le périmètre de recherche
-    des 4 sources et contribuent au score en cold start (voir scoring.py).
+    des 6 sources et contribuent au score en cold start (voir scoring.py).
 
 Barre latérale (visible sur tous les onglets) : identification légère,
 actions globales ("🔍 Lancer la recherche" / "🔄 Recalculer les scores"),
@@ -43,10 +50,12 @@ from supabase import Client, create_client
 
 import db
 import scoring
-from pipeline import enregistrer_swipe, lancer_recherche, recalculer_scores
+from pipeline import calculer_cutoff_nouveautes, enregistrer_swipe, lancer_recherche, recalculer_scores
 
 NOM_TABLE = "appels_offres"
 NOM_TABLE_SWIPES = "swipes"
+
+EMOJI_DECISION_UTILISATEUR = {"like": "🟢", "dislike": "🔴", None: "⚪"}
 
 # Valeurs internes inchangées (déjà utilisées partout en base) — seuls les
 # libellés affichés changent ("accepter/rejeter" prêtait à confusion).
@@ -54,17 +63,6 @@ DECISIONS: dict[str, str] = {
     "👍 Intéressant": "accepted",
     "👎 Pas intéressant": "rejected",
 }
-LIBELLE_DECISION_UTILISATEUR = {
-    "like": "👍 Intéressant",
-    "dislike": "👎 Pas intéressant",
-    None: "⏳ Non trié",
-}
-COULEUR_DECISION_UTILISATEUR = {
-    "like": "#22c55e",
-    "dislike": "#ef4444",
-    None: "#9ca3af",
-}
-
 # Variantes accentuées par lettre de base, pour surligner un mot-clé même si
 # le texte de l'avis a une accentuation légèrement différente de celle
 # enregistrée dans la liste (ex. mot-clé "menuiserie", avis "MENUISERIE").
@@ -157,6 +155,65 @@ def charger_offre_suivante(client: Client, user_id: str) -> dict | None:
     return random.choice(offres) if offres else None
 
 
+def afficher_details_offre(offre: dict) -> None:
+    """Contenu détaillé d'un avis (objet surligné, description, lots,
+    mots-clés trouvés, infos, score) — lecture seule, sans les boutons de
+    décision. Partagé entre la fiche de tri (voir `afficher_onglet_trier`,
+    qui l'entoure des boutons de décision) et la fenêtre modale ouverte
+    depuis Historique/Nouveautés (voir `_fiche_modale`)."""
+    # Pourquoi cet avis est proposé : mots-clés/lots/acheteur qui ont matché
+    # au moment de sa récupération (voir sources/commun.py,
+    # pipeline.py::formater_pour_supabase) — utilisés ci-dessous pour
+    # surligner leurs occurrences directement dans le texte de l'avis.
+    mots_cles_trouves = offre.get("mots_cles_trouves") or []
+
+    st.markdown(f"### {surligner(offre['objet'], mots_cles_trouves)}", unsafe_allow_html=True)
+
+    description = (offre.get("description") or "").strip()
+    if description:
+        LONGUEUR_MAX_AFFICHEE = 400
+        texte_affiche = description[:LONGUEUR_MAX_AFFICHEE] + "…" if len(description) > LONGUEUR_MAX_AFFICHEE else description
+        st.markdown(
+            f'<span style="font-size:0.85em; color:gray;">{surligner(texte_affiche, mots_cles_trouves)}</span>',
+            unsafe_allow_html=True,
+        )
+
+    lots = offre.get("lots") or []
+    if lots:
+        LONGUEUR_MAX_LOTS = 300
+        titres_lots = [lot.get("titre") or lot.get("identifiant") or "?" for lot in lots]
+        texte_lots = f"📦 {len(lots)} lot(s) : " + " · ".join(titres_lots)
+        if len(texte_lots) > LONGUEUR_MAX_LOTS:
+            texte_lots = texte_lots[:LONGUEUR_MAX_LOTS] + "…"
+        st.markdown(
+            f'<span style="font-size:0.85em; color:gray;">{surligner(texte_lots, mots_cles_trouves)}</span>',
+            unsafe_allow_html=True,
+        )
+
+    # Encadré explicite en plus du surlignage : certains mots-clés
+    # (ex. acheteur suivi) ne sont pas forcément visibles dans le texte
+    # affiché ci-dessus (objet/description/lots tronqués) — ce message
+    # reste la source de vérité de "pourquoi cet avis est proposé".
+    if mots_cles_trouves:
+        st.info("🔦 Cet avis a été choisi car il contient les mots-clés : **" + ", ".join(mots_cles_trouves) + "**")
+
+    departements = [str(d) for d in (offre.get("departement") or [])]
+    col_info, col_score = st.columns([4, 1])
+    with col_info:
+        st.write(f"🏢 **{offre.get('acheteur') or '—'}** · 📍 {', '.join(departements) or '—'} · 🗂️ {offre.get('source') or '—'}")
+        st.write(
+            f"📅 Limite **{offre.get('date_limite_reponse') or '—'}** · "
+            f"📄 Parution {offre.get('date_parution') or '—'} · "
+            f"🔢 {offre.get('nb_versions') or 1} version(s)"
+        )
+        urls = [u for u in (offre.get("urls") or "").split("; ") if u]
+        if urls:
+            st.write(" · ".join(f"🔗 {u}" for u in urls))
+    score = offre.get("score")
+    with col_score:
+        st.metric("Score", f"{score}/100" if score is not None else "non calculé")
+
+
 def afficher_onglet_trier(client: Client, user_id: str) -> None:
     nb_a_trier = len(charger_offres_a_trier(client, user_id))
     st.caption(f"👤 {user_id} · {nb_a_trier} appel(s) d'offre(s) restant(s) à trier pour vous (ordre aléatoire).")
@@ -181,58 +238,8 @@ def afficher_onglet_trier(client: Client, user_id: str) -> None:
         st.info("🎉 Plus rien à trier pour l'instant. Cliquez sur \"Lancer la recherche\" pour en récupérer d'autres.")
         return
 
-    # Pourquoi cet avis est proposé : mots-clés/lots/acheteur qui ont matché
-    # au moment de sa récupération (voir sources/commun.py,
-    # pipeline.py::formater_pour_supabase) — utilisés ci-dessous pour
-    # surligner leurs occurrences directement dans le texte de l'avis.
-    mots_cles_trouves = offre.get("mots_cles_trouves") or []
-
     with st.container(border=True):
-        st.markdown(f"### {surligner(offre['objet'], mots_cles_trouves)}", unsafe_allow_html=True)
-
-        description = (offre.get("description") or "").strip()
-        if description:
-            LONGUEUR_MAX_AFFICHEE = 400
-            texte_affiche = description[:LONGUEUR_MAX_AFFICHEE] + "…" if len(description) > LONGUEUR_MAX_AFFICHEE else description
-            st.markdown(
-                f'<span style="font-size:0.85em; color:gray;">{surligner(texte_affiche, mots_cles_trouves)}</span>',
-                unsafe_allow_html=True,
-            )
-
-        lots = offre.get("lots") or []
-        if lots:
-            LONGUEUR_MAX_LOTS = 300
-            titres_lots = [lot.get("titre") or lot.get("identifiant") or "?" for lot in lots]
-            texte_lots = f"📦 {len(lots)} lot(s) : " + " · ".join(titres_lots)
-            if len(texte_lots) > LONGUEUR_MAX_LOTS:
-                texte_lots = texte_lots[:LONGUEUR_MAX_LOTS] + "…"
-            st.markdown(
-                f'<span style="font-size:0.85em; color:gray;">{surligner(texte_lots, mots_cles_trouves)}</span>',
-                unsafe_allow_html=True,
-            )
-
-        # Encadré explicite en plus du surlignage : certains mots-clés
-        # (ex. acheteur suivi) ne sont pas forcément visibles dans le texte
-        # affiché ci-dessus (objet/description/lots tronqués) — ce message
-        # reste la source de vérité de "pourquoi cet avis est proposé".
-        if mots_cles_trouves:
-            st.info("🔦 Cet avis a été choisi car il contient les mots-clés : **" + ", ".join(mots_cles_trouves) + "**")
-
-        departements = [str(d) for d in (offre.get("departement") or [])]
-        col_info, col_score = st.columns([4, 1])
-        with col_info:
-            st.write(f"🏢 **{offre.get('acheteur') or '—'}** · 📍 {', '.join(departements) or '—'} · 🗂️ {offre.get('source') or '—'}")
-            st.write(
-                f"📅 Limite **{offre.get('date_limite_reponse') or '—'}** · "
-                f"📄 Parution {offre.get('date_parution') or '—'} · "
-                f"🔢 {offre.get('nb_versions') or 1} version(s)"
-            )
-            urls = [u for u in (offre.get("urls") or "").split("; ") if u]
-            if urls:
-                st.write(" · ".join(f"🔗 {u}" for u in urls))
-        score = offre.get("score")
-        with col_score:
-            st.metric("Score", f"{score}/100" if score is not None else "non calculé")
+        afficher_details_offre(offre)
 
         commentaire = st.text_area(
             "Commentaire / raison (optionnel)",
@@ -256,58 +263,122 @@ def afficher_onglet_trier(client: Client, user_id: str) -> None:
 
 
 # =====================================================================
-# Onglet "Historique"
+# Historique / Nouveautés — liste triable/filtrable, avec fiche détaillée
 # =====================================================================
 
 def charger_toutes_les_offres_avec_decision(client: Client, user_id: str) -> list[dict]:
     """Tous les avis en base, avec la décision de CET utilisateur (`like`/
     `dislike`/`None`) — pas la décision globale `appels_offres.decision`
     (informative, tous utilisateurs confondus) : chaque utilisateur a sa
-    propre file, l'historique doit refléter SES décisions à lui."""
+    propre file, l'historique doit refléter SES décisions à lui. Pas de tri
+    fixe ici (voir `afficher_liste_offres`, où le tri est un choix affiché
+    à l'utilisateur)."""
     offres = client.table(NOM_TABLE).select("*").execute().data
     swipes = client.table(NOM_TABLE_SWIPES).select("appel_offre_id,decision").eq("user_id", user_id).execute().data
     decisions = {s["appel_offre_id"]: s["decision"] for s in swipes}
     for o in offres:
         o["decision_utilisateur"] = decisions.get(o["id"])
-    offres.sort(key=lambda o: o.get("date_limite_reponse") or "9999-99-99")
     return offres
 
 
-def afficher_onglet_historique(client: Client, user_id: str) -> None:
-    offres = charger_toutes_les_offres_avec_decision(client, user_id)
+def charger_offre_par_id(client: Client, offre_id: str) -> dict | None:
+    reponse = client.table(NOM_TABLE).select("*").eq("id", offre_id).limit(1).execute()
+    return reponse.data[0] if reponse.data else None
 
-    filtre = st.radio(
-        "Filtrer",
-        ["Toutes", "👍 Intéressant", "👎 Pas intéressant"],
-        horizontal=True,
-        label_visibility="collapsed",
-    )
+
+def _fermer_fiche_modale() -> None:
+    st.session_state["offre_modale_id"] = None
+
+
+@st.dialog("Détails de l'avis", width="large", on_dismiss=_fermer_fiche_modale)
+def _fiche_modale(offre: dict) -> None:
+    afficher_details_offre(offre)
+    st.divider()
+    # Bouton explicite en plus de `on_dismiss` (qui couvre le X natif/Échap/
+    # clic à l'extérieur) : les deux chemins vident `offre_modale_id`, sinon
+    # la fiche se rouvrirait aussitôt au rerun suivant.
+    if st.button("✕ Fermer"):
+        _fermer_fiche_modale()
+        st.rerun()
+
+
+def afficher_liste_offres(offres: list[dict], cle_prefix: str) -> None:
+    """Filtre, trie et affiche une liste d'avis — partagé entre Historique
+    et Nouveautés. Chaque aperçu est un bouton cliquable (indicateur couleur
+    en emoji) qui ouvre la fiche complète (voir `afficher_details_offre`)
+    dans une fenêtre modale, en lecture seule."""
+    col_filtre, col_tri = st.columns(2)
+    with col_filtre:
+        filtre = st.segmented_control(
+            "Filtrer", ["Toutes", "👍 Intéressant", "👎 Pas intéressant"],
+            default="Toutes", required=True, key=f"{cle_prefix}_filtre",
+        )
+    with col_tri:
+        tri = st.segmented_control(
+            "Trier par", ["🎯 Score", "📅 Date de rendu"],
+            default="🎯 Score", required=True, key=f"{cle_prefix}_tri",
+        )
+
     if filtre == "👍 Intéressant":
         offres = [o for o in offres if o["decision_utilisateur"] == "like"]
     elif filtre == "👎 Pas intéressant":
         offres = [o for o in offres if o["decision_utilisateur"] == "dislike"]
 
-    st.caption(f"{len(offres)} avis.")
+    if tri == "🎯 Score":
+        offres = sorted(offres, key=lambda o: o.get("score") if o.get("score") is not None else -1, reverse=True)
+    else:
+        offres = sorted(offres, key=lambda o: o.get("date_limite_reponse") or "9999-99-99")
 
+    st.caption(f"{len(offres)} avis.")
     if not offres:
         st.info("Aucun avis à afficher pour ce filtre.")
         return
 
     for o in offres:
-        decision = o["decision_utilisateur"]
-        couleur = COULEUR_DECISION_UTILISATEUR[decision]
-        libelle = LIBELLE_DECISION_UTILISATEUR[decision]
+        emoji = EMOJI_DECISION_UTILISATEUR[o["decision_utilisateur"]]
         score = o.get("score")
         score_txt = f"{score}/100" if score is not None else "non calculé"
-        st.markdown(
-            f'<div style="border-left:5px solid {couleur}; padding:8px 14px; '
-            f'margin-bottom:8px; border-radius:4px; background:rgba(128,128,128,0.08);">'
-            f'<b>{escape(o["objet"])}</b><br>'
-            f'🏢 {escape(o.get("acheteur") or "—")} · 📅 {o.get("date_limite_reponse") or "—"} · '
-            f'🎯 {score_txt} · {libelle}'
-            f'</div>',
-            unsafe_allow_html=True,
-        )
+        nb_lots = len(o.get("lots") or [])
+        departements = ", ".join(str(d) for d in (o.get("departement") or [])) or "—"
+
+        with st.container(border=True):
+            if st.button(
+                f"{emoji} {o['objet']}",
+                key=f"{cle_prefix}_apercu_{o['id']}", use_container_width=True,
+            ):
+                st.session_state["offre_modale_id"] = o["id"]
+                st.rerun()
+            # st.markdown plutôt que st.caption : st.caption grise
+            # systématiquement le texte (voulu ailleurs pour du texte
+            # secondaire, mais peu lisible ici) — un texte normal reste
+            # net dans les deux thèmes (noir en clair, blanc en sombre).
+            st.markdown(
+                f"📅 {o.get('date_limite_reponse') or '—'}  ·  🎯 {score_txt}  ·  "
+                f"📦 {nb_lots} lot(s)  ·  📍 {departements}  ·  "
+                f"🗂️ {o.get('source') or '—'}  ·  🏢 {o.get('acheteur') or '—'}"
+            )
+            description = (o.get("description") or "").strip()
+            if description:
+                LONGUEUR_MAX_APERCU = 200
+                if len(description) > LONGUEUR_MAX_APERCU:
+                    description = description[:LONGUEUR_MAX_APERCU] + "…"
+                st.markdown(description)
+
+
+def afficher_onglet_historique(client: Client, user_id: str) -> None:
+    afficher_liste_offres(charger_toutes_les_offres_avec_decision(client, user_id), cle_prefix="historique")
+
+
+def afficher_onglet_nouveautes(client: Client, user_id: str) -> None:
+    cutoff = calculer_cutoff_nouveautes(client)
+    if cutoff is None:
+        st.info("🎉 Aucune recherche n'a encore été lancée. Cliquez sur \"Lancer la recherche\" pour commencer.")
+        return
+
+    offres = charger_toutes_les_offres_avec_decision(client, user_id)
+    offres = [o for o in offres if (o.get("created_at") or "") >= cutoff]
+    st.caption(f"Avis trouvés depuis la dernière recherche (ou depuis la 1ère recherche du jour s'il y en a eu plusieurs aujourd'hui) : {cutoff[:16].replace('T', ' ')} UTC.")
+    afficher_liste_offres(offres, cle_prefix="nouveautes")
 
 
 # =====================================================================
@@ -413,7 +484,7 @@ with st.sidebar:
 
     # `st.status` : les deux actions ci-dessous peuvent prendre plusieurs
     # dizaines de secondes à quelques minutes (embeddings, appels réseau aux
-    # 4 sources...) — affiche chaque étape en direct pour que l'utilisateur
+    # 6 sources...) — affiche chaque étape en direct pour que l'utilisateur
     # voie que ça travaille plutôt que d'abandonner en pensant que la page
     # est figée.
     if st.button("🔍 Lancer la recherche", type="primary", use_container_width=True):
@@ -446,12 +517,27 @@ with st.sidebar:
 for message in st.session_state.get("erreurs_sources", []):
     st.error(message)
 
+# --- Fiche détaillée (Historique/Nouveautés -> clic sur un aperçu) ------
+# Vérifié avant les onglets : la fenêtre modale doit s'ouvrir quel que soit
+# l'onglet affiché au moment du clic (le clic déclenche déjà un st.rerun()).
+if st.session_state.get("offre_modale_id"):
+    offre_modale = charger_offre_par_id(client, st.session_state["offre_modale_id"])
+    if offre_modale is None:
+        st.session_state["offre_modale_id"] = None  # avis supprimé entre-temps (ex. expiré)
+    else:
+        _fiche_modale(offre_modale)
+
 # --- Onglets --------------------------------------------------------------
 user_id = st.session_state["user_id"] or "anonyme"
-tab_trier, tab_historique, tab_mots_cles = st.tabs(["🎯 Trier", "📋 Historique", "🔑 Mots-clés"])
+tab_trier, tab_nouveautes, tab_historique, tab_mots_cles = st.tabs(
+    ["🎯 Trier", "🆕 Nouveautés", "📋 Historique", "🔑 Mots-clés"]
+)
 
 with tab_trier:
     afficher_onglet_trier(client, user_id)
+
+with tab_nouveautes:
+    afficher_onglet_nouveautes(client, user_id)
 
 with tab_historique:
     afficher_onglet_historique(client, user_id)

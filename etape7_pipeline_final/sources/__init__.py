@@ -1,23 +1,26 @@
 """
-sources/__init__.py — point d'entrée unique des 4 sources de données
+sources/__init__.py — point d'entrée unique des 6 sources de données
 ================================================================================
 
-`recuperer_toutes_les_offres(...)` appelle BOAMP, TED, AWS et PLACE à la
-suite, chacune protégée individuellement : si l'une plante (site changé,
-identifiants manquants, réseau...), elle est signalée via `on_erreur` et les
-3 autres continuent normalement — une panne d'une source ne doit jamais
-empêcher de récupérer les autres.
+`recuperer_toutes_les_offres(...)` appelle BOAMP, TED, AWS, PLACE, EMP
+(e-marchespublics) et ACHAT_PUBLIC à la suite, chacune protégée
+individuellement : si l'une plante (site changé, identifiants manquants,
+réseau...), elle est signalée via `on_erreur` et les 5 autres continuent
+normalement — une panne d'une source ne doit jamais empêcher de récupérer
+les autres.
 
 Une fois toutes les sources récupérées : fusion des doublons (un même
 marché republié/rectifié, y compris à cheval entre deux sources — voir
-commun.py) puis filtre mots-clés/lots/acheteurs suivis.
+commun.py ; e-marchespublics agrège lui-même BOAMP/JOUE, donc ce cas est
+particulièrement attendu entre EMP et BOAMP/TED) puis filtre mots-clés/lots/
+acheteurs suivis.
 """
 
 from __future__ import annotations
 
 from typing import Callable
 
-from . import aws_solutions, boamp, place, ted
+from . import achat_public, aws_solutions, boamp, e_marche, place, ted
 from .commun import fusionner_doublons, trouver_correspondances
 
 # (nom affiché, fonction `recuperer`, nom de fichier pour le message d'erreur)
@@ -26,6 +29,8 @@ _SOURCES = [
     ("TED", ted.recuperer, "ted.py"),
     ("AWS", aws_solutions.recuperer, "aws_solutions.py"),
     ("PLACE", place.recuperer, "place.py"),
+    ("EMP", e_marche.recuperer, "e_marche.py"),
+    ("ACHAT_PUBLIC", achat_public.recuperer, "achat_public.py"),
 ]
 
 
@@ -65,7 +70,7 @@ def recuperer_toutes_les_offres(
     on_progress: Callable[[str], None] | None = None,
     on_erreur: Callable[[str, str], None] | None = None,
 ) -> list[dict]:
-    """Récupère, fusionne et filtre les avis des 4 sources.
+    """Récupère, fusionne et filtre les avis des 6 sources.
 
     `on_progress(message)` : progression textuelle (voir app.py, fenêtre de
     chargement). `on_erreur(nom_source, message)` : appelé une fois par

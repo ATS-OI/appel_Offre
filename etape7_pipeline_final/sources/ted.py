@@ -12,7 +12,13 @@ from __future__ import annotations
 
 import requests
 
-from .commun import normaliser_date
+try:
+    from .commun import normaliser_date
+except ImportError:
+    # Lancé directement (`python sources/ted.py` ou bouton "Run" de l'IDE)
+    # plutôt qu'en module (`python -m sources.ted`) — voir boamp.py pour le
+    # détail de ce repli.
+    from commun import normaliser_date
 
 BASE_URL = "https://api.ted.europa.eu/v3/notices/search"
 
@@ -158,3 +164,27 @@ def recuperer(departements: list[str], seulement_ouverts: bool = True, limit: in
             "_annonce_lie": [],  # pas de rectificatif chaîné côté TED
         })
     return resultats
+
+
+if __name__ == "__main__":
+    # Test manuel : `python -m sources.ted` OU `python sources/ted.py`
+    # (depuis etape7_pipeline_final/, ou bouton "Run" de l'IDE) — les deux
+    # marchent (voir le try/except d'import de `commun` en tête de fichier).
+    # API publique, aucun identifiant requis — plusieurs scénarios enchaînés
+    # pour balayer différentes combinaisons de paramètres.
+    import json
+
+    print("=" * 70)
+    print("sources/ted.py — test manuel")
+    print("=" * 70)
+
+    scenarios = [
+        ("974 seul, ouverts uniquement", ["974"], True),
+        ("976 seul, ouverts uniquement", ["976"], True),
+        ("974+976, tous (ouverts ou non)", ["974", "976"], False),
+    ]
+    for libelle, departements, seulement_ouverts in scenarios:
+        resultats = recuperer(departements, seulement_ouverts=seulement_ouverts, limit=20)
+        print(f"\n--- {libelle} : {len(resultats)} résultat(s) ---")
+        if resultats:
+            print(json.dumps(resultats[0], ensure_ascii=False, indent=2)[:500] + " ...")

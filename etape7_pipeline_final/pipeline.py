@@ -1,10 +1,12 @@
 """
-pipeline.py — orchestration : les 3 actions que le site peut déclencher
+pipeline.py — orchestration : les actions que le site peut déclencher
 ================================================================================
 
-  - `lancer_recherche(...)` : interroge les 4 sources (sources/__init__.py),
+  - `lancer_recherche(...)` : interroge les 6 sources (sources/__init__.py),
     upsert les résultats dans `appels_offres`, puis calcule le score de tout
     le monde (`recalculer_scores`). Action LOURDE (réseau + embeddings).
+    Enregistre aussi un repère temporel dans `recherches` (voir
+    `calculer_cutoff_nouveautes`, utilisé par l'onglet "🆕 Nouveautés").
   - `recalculer_scores(...)` : (re)calcule le score de tous les avis en base,
     sans réinterroger les sources. Action LOURDE (embeddings).
   - `enregistrer_swipe(...)` : enregistre une décision (accepter/rejeter).
@@ -19,8 +21,9 @@ un emoji (message de progression) — `errors="replace"` évite le crash.
 
 from __future__ import annotations
 
+import hashlib
 import sys
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Callable
 
 from supabase import Client
@@ -35,6 +38,7 @@ from sources import recuperer_toutes_les_offres
 NOM_TABLE_OFFRES = "appels_offres"
 NOM_TABLE_RAISONS = "raisons"
 NOM_TABLE_SWIPES = "swipes"
+NOM_TABLE_RECHERCHES = "recherches"
 
 DECISIONS_POSITIVES = {"accepted"}  # accepted -> like ; rejected -> dislike
 
@@ -45,13 +49,33 @@ def _annoncer(message: str, on_progress: Callable[[str], None] | None) -> None:
         on_progress(message)
 
 
+def _identifiants_ou_repli(resultat: dict) -> str:
+    """Joint les identifiants d'origine — ou, s'il n'y en a aucun (un
+    scraper HTML n'a pas réussi à extraire de référence sur cet avis, ex.
+    sources/achat_public.py ou sources/e_marche.py sur une fiche au format
+    inattendu), fabrique une clé de repli STABLE (même avis -> même clé d'un
+    lancement à l'autre, donc l'upsert le met bien à jour au lieu de le
+    dupliquer) à partir de champs qui ne changent pas.
+
+    Sans ça, tous les avis sans référence extraite se retrouvent avec la
+    même chaîne vide `""` comme `identifiants` — Postgres refuse alors
+    l'upsert en lot ("ON CONFLICT DO UPDATE command cannot affect row a
+    second time"), un même bloc contenant plusieurs fois la même clé.
+    """
+    identifiants = "; ".join(resultat["identifiants"])
+    if identifiants:
+        return identifiants
+    base = f"{resultat.get('source')}|{resultat.get('objet')}|{resultat.get('acheteur')}|{resultat.get('date_limite_reponse')}"
+    return "SANS-REF-" + hashlib.sha1(base.encode("utf-8")).hexdigest()[:16]
+
+
 def formater_pour_supabase(resultat: dict) -> dict:
     """Adapte un dict renvoyé par `recuperer_toutes_les_offres` au schéma de
     la table `appels_offres`. Le score n'est pas calculé ici (voir
     `recalculer_scores`, appelé juste après)."""
     departement = [d.strip() for d in (resultat.get("departement") or "").split(",") if d.strip()]
     return {
-        "identifiants": "; ".join(resultat["identifiants"]),
+        "identifiants": _identifiants_ou_repli(resultat),
         "objet": resultat["objet"],
         "description": resultat.get("description") or None,
         "lots": resultat.get("lots") or [],
@@ -96,6 +120,45 @@ def supprimer_offres_expirees(client: Client, on_progress: Callable[[str], None]
     return len(ids)
 
 
+def calculer_cutoff_nouveautes(client: Client) -> str | None:
+    """Détermine à partir de quelle date/heure un avis compte comme
+    "nouveauté" (voir app.py, onglet "🆕 Nouveautés") :
+
+      - s'il y a eu au moins une recherche AUJOURD'HUI, le repère est la
+        PREMIÈRE recherche du jour — pas la dernière : sinon relancer une
+        2e recherche le même jour ferait disparaître de "Nouveautés" les
+        avis trouvés par la 1ère, ce qui donnerait l'impression que le
+        bouton "efface" les résultats précédents ;
+      - sinon (dernière recherche connue plus ancienne, ou aucune recherche
+        jamais lancée), le repère est la toute dernière recherche connue
+        (ou `None` si la table est vide — base toute fraîche).
+    """
+    # `lancee_le` est stocké en UTC (voir `lancer_recherche`) — la borne du
+    # jour doit l'être aussi, sinon le calcul du jour serait décalé selon le
+    # fuseau du serveur qui exécute ce code.
+    aujourdhui_utc = datetime.now(timezone.utc).date().isoformat()
+    recherches_du_jour = (
+        client.table(NOM_TABLE_RECHERCHES)
+        .select("lancee_le")
+        .gte("lancee_le", aujourdhui_utc)
+        .order("lancee_le")
+        .execute()
+        .data
+    )
+    if recherches_du_jour:
+        return recherches_du_jour[0]["lancee_le"]
+
+    derniere = (
+        client.table(NOM_TABLE_RECHERCHES)
+        .select("lancee_le")
+        .order("lancee_le", desc=True)
+        .limit(1)
+        .execute()
+        .data
+    )
+    return derniere[0]["lancee_le"] if derniere else None
+
+
 def lancer_recherche(
     client: Client,
     departements: list[str],
@@ -103,8 +166,10 @@ def lancer_recherche(
     on_progress: Callable[[str], None] | None = None,
     on_erreur: Callable[[str, str], None] | None = None,
 ) -> list[dict]:
-    """Pipeline complet : nettoyage des avis expirés + récupération (4
+    """Pipeline complet : nettoyage des avis expirés + récupération (6
     sources) + insertion + scoring."""
+    client.table(NOM_TABLE_RECHERCHES).insert({"lancee_le": datetime.now(timezone.utc).isoformat()}).execute()
+
     supprimer_offres_expirees(client, on_progress=on_progress)
 
     mots_cles = db.charger_mots_cles(client)
@@ -122,6 +187,23 @@ def lancer_recherche(
         return []
 
     lignes = [formater_pour_supabase(r) for r in resultats]
+
+    # Garde-fou : un upsert en lot avec deux lignes qui partagent la même
+    # `identifiants` fait échouer TOUTE la requête côté Postgres ("ON
+    # CONFLICT DO UPDATE command cannot affect row a second time"). Ne
+    # devrait plus arriver grâce à `_identifiants_ou_repli`, mais on
+    # dédoublonne quand même ici en dernier recours (garde la dernière
+    # occurrence) plutôt que de laisser toute la recherche échouer pour
+    # une poignée d'avis en conflit.
+    lignes_par_id: dict[str, dict] = {ligne["identifiants"]: ligne for ligne in lignes}
+    if len(lignes_par_id) < len(lignes):
+        _annoncer(
+            f"⚠️ {len(lignes) - len(lignes_par_id)} avis avaient la même clé "
+            f"(identifiants) qu'un autre — un seul gardé par clé en double.",
+            on_progress,
+        )
+    lignes = list(lignes_par_id.values())
+
     _annoncer(f"💾 Enregistrement de {len(lignes)} avis dans Supabase...", on_progress)
     client.table(NOM_TABLE_OFFRES).upsert(lignes, on_conflict="identifiants").execute()
 

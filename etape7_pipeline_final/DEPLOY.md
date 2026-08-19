@@ -13,9 +13,9 @@ ci-dessous).
 - RAM limitée (1 Go) alors que le modèle d'embedding utilisé
   (`sentence-transformers`, e5-large) pèse à lui seul près de 2 Go une fois
   chargé — risque de plantage plutôt qu'un service stable.
-- Bac à sable restreint : la source AWS a besoin d'un navigateur headless
-  (Playwright), pas garanti de fonctionner de façon fiable sur ce type
-  d'hébergement partagé.
+- Bac à sable restreint : les sources AWS et e-marchespublics ont besoin
+  d'un navigateur headless (Playwright), pas garanti de fonctionner de
+  façon fiable sur ce type d'hébergement partagé.
 
 ## Recommandation : une petite VM avec Docker, toujours allumée
 
